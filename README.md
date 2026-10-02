@@ -106,10 +106,11 @@ It prints a results table, a breakdown of the trades and a verdict, then shows t
 ## How to run
 
 ```
-git clone https://github.com/ron-btnk/Backtester
+cd ~\Desktop
+git clone https://github.com
 cd Backtester
-pip install -r requirements.txt
-jupyter notebook Backtester.ipynb
+python -m pip install -r requirements.txt
+python -m notebook Backtester.ipynb
 ```
 
 Run all cells, then press Enter for the default study or type C for your own rules.
