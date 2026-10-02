@@ -107,7 +107,7 @@ It prints a results table, a breakdown of the trades and a verdict, then shows t
 
 ```
 cd ~\Desktop
-git clone https://github.com
+git clone https://github.com/ron-btnk/Backtester
 cd Backtester
 python -m pip install -r requirements.txt
 python -m notebook Backtester.ipynb
