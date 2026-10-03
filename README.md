@@ -103,6 +103,10 @@ It prints a results table, a breakdown of the trades and a verdict, then shows t
 
 ## How to run
 
+There are three ways to run it. All three use the same engine and give the same results.
+
+### 1. Jupyter notebook
+
 ```
 cd ~\Desktop
 git clone https://github.com/ron-btnk/Backtester
@@ -113,16 +117,35 @@ python -m notebook Backtester.ipynb
 
 Run all cells, then press Enter for the default study or type C for your own rules.
 
-## Web app
+- Advantages: you see all the code and can change anything
+- Disadvantages: you need Python installed, and you work through text prompts instead of a proper interface
 
-There is also a web front end, so you can use the backtester without seeing any code.
+### 2. Web app, run locally
 
 ```
 python -m pip install -r requirements.txt
 streamlit run app.py
 ```
 
-It opens in your browser. The main page explains the pendulum study and has a button to run it. The sidebar is for your own backtest: pick quick or advanced mode, fill in the tickers, dates, rules and cost, and press Run backtest. Results show the return, Sharpe and max drawdown against buy & hold, the verdict, and tabs for charts, trades, train vs test and the robustness checks.
+It opens in your browser at `http://localhost:8501`. No code to look at, just a web page.
+
+- Advantages: faster than the hosted version, because it uses your own CPU and memory instead of a shared server. It doesn't go to sleep and doesn't depend on the hosted app being up
+- Disadvantages: you still need Python installed and have to clone the repo and install the dependencies first. It only runs on your machine while the command is running
+
+### 3. Web app, hosted on Streamlit Community Cloud
+
+https://backtester-rbtnk.streamlit.app/
+
+Open the link and it runs in your browser. It looks and works the same as the local web app.
+
+- Advantages: nothing to install, no Python needed, works on any device including a phone, and it's easy to share
+- Disadvantages: slower, because it runs on a small shared server. The heavy parts (300 random strategies, the sensitivity heatmap, the parameter search) take noticeably longer. The app also goes to sleep when nobody has used it for a while, so the first load can take a minute to wake up
+
+Use the hosted version to try it out, and run it locally if you're going to do a lot of backtests or use the advanced checks.
+
+## Web app
+
+The main page explains the pendulum study and has a button to run it. The sidebar is for your own backtest: pick quick or advanced mode, fill in the tickers, dates, rules and cost, and press Run backtest. Results show the return, Sharpe and max drawdown against buy & hold, the verdict, and tabs for charts, trades, train vs test and the robustness checks.
 
 The engine lives in `backtester.py`, which is the notebook's code without the prompts. `app.py` is the web page.
 
@@ -135,3 +158,7 @@ The engine lives in `backtester.py`, which is the notebook's code without the pr
 - Only one currency pair so far
 
 Not financial advice.
+
+Try it in your browser: https://backtester-rbtnk.streamlit.app/
+
+The web front end is built with Streamlit, and I used Claude Code for it.
