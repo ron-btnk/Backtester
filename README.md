@@ -115,6 +115,19 @@ python -m notebook Backtester.ipynb
 
 Run all cells, then press Enter for the default study or type C for your own rules.
 
+## Web app
+
+There is also a web front end, so you can use the backtester without seeing any code.
+
+```
+python -m pip install -r requirements.txt
+streamlit run app.py
+```
+
+It opens in your browser. The main page explains the pendulum study and has a button to run it. The sidebar is for your own backtest: pick quick or advanced mode, fill in the tickers, dates, rules and cost, and press Run backtest. Results show the return, Sharpe and max drawdown against buy & hold, the verdict, and tabs for charts, trades, train vs test and the robustness checks.
+
+The engine lives in `backtester.py`, which is the notebook's code without the prompts. `app.py` is the web page.
+
 ## Limitations
 
 - Daily data only
