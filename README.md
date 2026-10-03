@@ -123,6 +123,9 @@ Run all cells, then press Enter for the default study or type C for your own rul
 ### 2. Web app, run locally
 
 ```
+cd ~\Desktop
+git clone https://github.com/ron-btnk/Backtester
+cd Backtester
 python -m pip install -r requirements.txt
 streamlit run app.py
 ```
