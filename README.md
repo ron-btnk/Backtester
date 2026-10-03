@@ -4,8 +4,6 @@ A backtesting engine where you write trading rules as text, including formulas, 
 
 I mostly used it on EUR/USD to test my own ideas. All rules were designed on 2005-2015. I didn't touch 2016-2026 until the end, so that each idea got one honest test on data it had never seen.
 
-**Result:** I tested 8 hypotheses and 2 survived: the 200-day trend rule and my "rally then dip" rule. Both made money in both periods while buy & hold lost about 17%. The pendulum idea, which is the default study, didn't.
-
 ## Default study: does EUR/USD move like a pendulum?
 
 Run all cells and press Enter to reproduce this.
