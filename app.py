@@ -27,7 +27,31 @@ STYLE = """
 [data-testid="stMetricValue"] {font-size: clamp(1.25rem, 4.5cqw, 2.25rem);}
 [data-testid="stMetricValue"] > div {overflow: visible; text-overflow: clip; white-space: nowrap;}
 .katex-display {overflow-x: auto; overflow-y: hidden; padding: 0.25rem 0;}
+[data-testid="stBaseButton-primary"]:active {transform: scale(0.97);}
+.skeleton {display: flex; flex-direction: column; gap: 1rem; min-height: 75vh; padding-top: 0.5rem;}
+.skeleton .cards {display: flex; gap: 1rem;}
+.skeleton .bar {
+    flex: 1; height: 5.5rem; border-radius: 0.5rem; background-size: 200% 100%;
+    background-image: linear-gradient(90deg, rgba(128, 128, 128, 0.14) 25%, rgba(128, 128, 128, 0.28) 50%,
+                                      rgba(128, 128, 128, 0.14) 75%);
+    animation: skeleton-shimmer 1.4s linear infinite;
+}
+.skeleton .bar.title {flex: none; height: 2.25rem; width: 45%;}
+.skeleton .bar.chart {min-height: 16rem;}
+@keyframes skeleton-shimmer {from {background-position: 200% 0;} to {background-position: -200% 0;}}
+@media (prefers-reduced-motion: reduce) {.skeleton .bar {animation: none;}}
 </style>
+"""
+
+# grey placeholder in the shape of the results (title, three metric cards, verdict, chart), shown while a
+# backtest runs. It is tall enough that the spinner above it can be scrolled to the top of the screen
+SKELETON = """
+<div class="skeleton">
+  <div class="bar title"></div>
+  <div class="cards"><div class="bar"></div><div class="bar"></div><div class="bar"></div></div>
+  <div class="bar"></div>
+  <div class="bar chart"></div>
+</div>
 """
 
 GUIDE = """
@@ -381,7 +405,7 @@ def pendulum_card():
         st.markdown(
             "- **θ**: how far price is from its 60-day average, in standard deviations\n"
             "- **v**: how much θ changed since yesterday\n"
-            "- **ω²**: 0.01, how strongly price is pulled back (a swing of about 60 days)\n\n"
+            "- **ω²**: 0.01, how strongly price is pulled back (a swing of about 63 days)\n\n"
             "Markets aren't a perfect pendulum, so friction lets the swing keep only 80% of that, and news "
             "can knock it off course completely.\n\n"
             "Buy when a swing bottoms out below -1.5 and sell when it reaches 80% of the predicted "
@@ -401,12 +425,16 @@ def scroll_to_results():
 @contextmanager
 def running(message):
     # the results sit below the study card, so bring that spot into view straight away: the spinner
-    # then shows where the results will appear, and a second one sits under the sidebar's Run button
-    scroll_to_results()
+    # then shows where the results will appear, and a second one sits under the sidebar's Run button.
+    # The skeleton below the spinner shows the shape of what is coming
     with ExitStack() as spinners:
         with st.sidebar:
             spinners.enter_context(st.spinner("Running...", show_time=True))
         spinners.enter_context(st.spinner(message, show_time=True))
+        skeleton = st.empty()
+        skeleton.html(SKELETON)
+        spinners.callback(skeleton.empty)
+        scroll_to_results()
         yield
 
 
@@ -421,7 +449,8 @@ def main():
     with st.expander("How to write rules"):
         st.markdown(GUIDE)
 
-    st.html('<div id="results"></div>')
+    # the margin keeps the spot clear of Streamlit's top bar when it is scrolled into view
+    st.html('<div id="results" style="scroll-margin-top: 4.5rem"></div>')
     if run_default:
         st.session_state["problems"] = []
         with running("Running the pendulum study. This can take a minute..."):

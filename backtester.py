@@ -42,7 +42,7 @@ Default study: does EUR/USD move like a pendulum?
 The 60-day average is the bottom of the swing, and price is the pendulum.
   θ   how far price is from its 60-day average, in standard deviations
   v   how much θ changed since yesterday
-  ω²  0.01, how strongly price is pulled back (a swing of about 60 days)
+  ω²  0.01, how strongly price is pulled back (a swing of about 63 days)
 
 For small swings a pendulum follows  d²θ/dt² = -ω²θ.  Its energy ½v² + ½ω²θ² tells you how far
 the swing will go:  amplitude = √(θ² + v²/ω²).  Markets aren't a perfect pendulum, so friction
@@ -91,7 +91,7 @@ CUSTOM_DEFAULTS = {
 HELP = """
 INDICATORS (replace N with a number, at least 2)
   PRICE, MAN, EMAN, STDN, RSIN, ZSCOREN, VOLN (annual %), HIGHN / LOWN (previous N days),
-  RETURN_ND (%), DIST_MAN (%), MACD, MACD_SIGNAL, DRAWDOWN (%)
+  RETURN_ND (%), DIST_MAN / DIST_HIGHN / DIST_LOWN (%), MACD, MACD_SIGNAL, DRAWDOWN (%)
 
 OPERATORS   >  <  >=  <=  CROSSES_ABOVE  CROSSES_BELOW      combine with AND / OR
 

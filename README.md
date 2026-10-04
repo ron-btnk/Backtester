@@ -10,7 +10,7 @@ More on the strategies:
 
 | Strategy | Idea | Result |
 |---|---|---|
-| 200-day trend | Long above the 200-day average, short below | Worked. About +26%, positive in both periods |
+| 200-day trend | Long above the 200-day average, short below | Worked. About +27%, positive in both periods |
 | Rally then dip | Profit-takers cause a dip, latecomers buy it | Worked. About +31%, positive in both periods |
 | Break-even vs momentum | Size of the drop decides who wins at the old high | Mixed. Roughly flat, lost in training, gained in the test |
 | Pendulum | Price swings around its average like a pendulum | Failed. [Details](#the-pendulum-model) |
@@ -19,7 +19,7 @@ More on the strategies:
 | Equilibrium mean reversion | Bet on a return to the average | Failed on 2005-2015 |
 | Break-even sellers | Old highs act as resistance, old lows as support | Failed on 2005-2015 |
 
-I designed every rule on 2005-2015 and tested it on 2016-2026. Buy and hold lost about 17% over that time. The last two failed in 2005-2015, so they never got to the test. [More on the two that worked](#the-two-that-worked)
+I designed every rule on 2005-2015 and tested it on 2016-2026. Buy and hold lost about 17% over the full 2005-2026 period. The last two failed in 2005-2015, so they never got to the test. [More on the two that worked](#the-two-that-worked)
 
 ## The pendulum model
 
@@ -119,7 +119,7 @@ SHORT IF ZSCORE20 > 2
 COVER IF ZSCORE20 < 0
 ```
 
-Indicators are PRICE, MA, EMA, STD, RSI, ZSCORE, VOL, HIGH, LOW, RETURN_ND, DIST_MA, DIST_HIGH, DIST_LOW, MACD and DRAWDOWN, with a window added, for example MA60. `PRICE[1]` is yesterday's price and `PRICE[2]` the day before. Formulas can use `+ - * / ^`, brackets, and SIN, COS, TAN, ASIN, ACOS, ATAN, ABS, SQRT, LOG and EXP. Conditions combine with AND / OR. Position sizing, a volatility target, stop loss and take profit are optional.
+Indicators are PRICE, MA, EMA, STD, RSI, ZSCORE, VOL, HIGH, LOW, RETURN_ND, DIST_MA, DIST_HIGH and DIST_LOW, with a window added, for example MA60. MACD, MACD_SIGNAL and DRAWDOWN take no window. `PRICE[1]` is yesterday's price and `PRICE[2]` the day before. Formulas can use `+ - * / ^`, brackets, and SIN, COS, TAN, ASIN, ACOS, ATAN, ABS, SQRT, LOG and EXP. Conditions combine with AND / OR. Position sizing, a volatility target, stop loss and take profit are optional.
 
 ## Run it yourself
 
