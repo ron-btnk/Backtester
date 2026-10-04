@@ -1,6 +1,7 @@
 """Streamlit front end for the backtester. Run with: streamlit run app.py"""
 
 import time
+from contextlib import ExitStack, contextmanager
 from datetime import date
 
 import matplotlib.pyplot as plt
@@ -391,6 +392,24 @@ def pendulum_card():
         return st.button("Run the pendulum study", type="primary")
 
 
+def scroll_to_results():
+    st.html(f'<script>/* {time.time()} */'
+            'document.getElementById("results")?.scrollIntoView({behavior: "smooth"})</script>',
+            unsafe_allow_javascript=True)
+
+
+@contextmanager
+def running(message):
+    # the results sit below the study card, so bring that spot into view straight away: the spinner
+    # then shows where the results will appear, and a second one sits under the sidebar's Run button
+    scroll_to_results()
+    with ExitStack() as spinners:
+        with st.sidebar:
+            spinners.enter_context(st.spinner("Running...", show_time=True))
+        spinners.enter_context(st.spinner(message, show_time=True))
+        yield
+
+
 def main():
     st.markdown(STYLE, unsafe_allow_html=True)
     st.title("Backtester")
@@ -402,9 +421,10 @@ def main():
     with st.expander("How to write rules"):
         st.markdown(GUIDE)
 
+    st.html('<div id="results"></div>')
     if run_default:
         st.session_state["problems"] = []
-        with st.spinner("Running the pendulum study. This can take a minute..."):
+        with running("Running the pendulum study. This can take a minute..."):
             study = pendulum_study(date.today().isoformat())
         if not study["results"]:
             pendulum_study.clear()  # e.g. Yahoo was unreachable: try again next time
@@ -414,20 +434,16 @@ def main():
         st.session_state["problems"] = problems
         st.session_state.pop("study", None)
         if not problems:
-            with st.spinner("Running the backtest and the robustness checks. This can take a minute..."
-                            if advanced else "Running the backtest..."):
+            with running("Running the backtest and the robustness checks. This can take a minute..."
+                         if advanced else "Running the backtest..."):
                 st.session_state["study"] = {**analyse(*inputs, advanced), "title": "Your backtest"}
 
-    st.html('<div id="results"></div>')
     for problem in st.session_state.get("problems", []):
         st.error(problem)
     if "study" in st.session_state:
         show_study(st.session_state["study"])
     if run_default or run_custom:
-        # the results sit below the study card, so bring them into view after a run
-        st.html(f'<script>/* {time.time()} */'
-                'document.getElementById("results")?.scrollIntoView({behavior: "smooth"})</script>',
-                unsafe_allow_javascript=True)
+        scroll_to_results()  # again once the results are drawn, in case the page moved
     st.caption("Daily data only. Not financial advice.")
 
 
