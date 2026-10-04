@@ -371,18 +371,20 @@ def pendulum_card():
     d = bt.DEFAULT_STUDY
     with st.container(border=True):
         st.subheader("Does EUR/USD move like a pendulum?")
-        st.write("My default study. The 60-day average is treated as the bottom of a pendulum's swing and "
-                 "price as the pendulum. Rules were set on 2005-2015 and tested on 2016 onwards.")
-        st.caption("Equation of motion")
-        st.latex(r"\frac{d^2\theta}{dt^2} = -\frac{g}{L}\,\sin\theta")
-        st.caption("Energy is conserved, so a swing turns at")
-        st.latex(r"\theta = \arccos\!\left(\cos\theta - \frac{v^2}{2\,g/L}\right)")
+        st.write("My default study. The 60-day average is the bottom of the swing and price is the pendulum. "
+                 "Rules were set on 2005-2015 and tested on 2016 onwards.")
+        st.caption("Equation of motion, for small swings")
+        st.latex(r"\frac{d^2\theta}{dt^2} = -\omega^2\,\theta")
+        st.caption(r"Its energy ½v² + ½ω²θ² tells you how far the swing will go")
+        st.latex(r"\text{amplitude} = \sqrt{\theta^2 + \frac{v^2}{\omega^2}}")
         st.markdown(
             "- **θ**: how far price is from its 60-day average, in standard deviations\n"
             "- **v**: how much θ changed since yesterday\n"
-            "- **g/L**: 0.05, how strongly price is pulled back to the average\n\n"
-            "Buy when a swing bottoms out below -1.5 and sell where the formula says it turns on the "
-            "other side. If no turning point exists (the swing would go over the top), the average has "
+            "- **ω²**: 0.01, how strongly price is pulled back (a swing of about 60 days)\n\n"
+            "Markets aren't a perfect pendulum, so friction lets the swing keep only 80% of that, and news "
+            "can knock it off course completely.\n\n"
+            "Buy when a swing bottoms out below -1.5 and sell when it reaches 80% of the predicted "
+            "amplitude on the other side. If price runs past 3 standard deviations, the average has "
             "probably moved, so get out. Shorts are the mirror image.")
         with st.expander("The rules, written out in full"):
             st.code("\n".join(d["settings"][key] for _, key in bt.RULE_SIDES), language=None, wrap_lines=True)

@@ -25,31 +25,31 @@ TUNE_PASSES = 3
 MAX_MARKERS = 200
 RULE_SIDES = [("buy", "buy_rule"), ("sell", "sell_rule"), ("short", "short_rule"), ("cover", "cover_rule")]
 
-# The pendulum written in the rule language:
-#   THETA  = (PRICE - MA60) / STD60                      angle: distance from equilibrium
-#   V      = THETA - THETA[1]                             velocity: dθ/dt, one day per step
-#   ENERGY = COS(THETA) - V ^ 2 / (2 * 0.05)              from ½v² + (g/L)(1 - cos θ) = constant
-#   TURN   = ACOS(ENERGY)                                 where the swing turns (v = 0)
-# The rules below are those formulas written out in full.
+# The pendulum written in the rule language (small swings, with friction):
+#   THETA = (PRICE - MA60) / STD60             distance from equilibrium, in standard deviations
+#   V     = THETA - THETA[1]                    velocity, one day per step
+#   TURN  = 0.8 * SQRT(THETA^2 + V^2 / 0.01)    where the swing turns: energy ½v² + ½ω²θ² with ω² = 0.01
+#                                               gives the amplitude, of which friction lets it keep 80%
 _T = "(PRICE - MA60) / STD60"
 _T1 = "(PRICE[1] - MA60[1]) / STD60[1]"
 _T2 = "(PRICE[2] - MA60[2]) / STD60[2]"
-_ENERGY = f"COS({_T}) - ({_T} - {_T1}) ^ 2 / (2 * 0.05)"
+_TURN = f"0.8 * SQRT(({_T}) ^ 2 + ({_T} - {_T1}) ^ 2 / 0.01)"
 
 DEFAULT_STUDY = {
     "physics": """
 Default study: does EUR/USD move like a pendulum?
 
-The 60-day average is treated as the bottom of a pendulum's swing, and price as the pendulum.
-  Equation of motion:  d²θ/dt² = -(g/L) · sin θ
-  Energy is conserved, so a swing turns at  θ = arccos(cos θ - v² / (2·g/L))
+The 60-day average is the bottom of the swing, and price is the pendulum.
+  θ   how far price is from its 60-day average, in standard deviations
+  v   how much θ changed since yesterday
+  ω²  0.01, how strongly price is pulled back (a swing of about 60 days)
 
-  θ    how far price is from its 60-day average, in standard deviations
-  v    how much θ changed since yesterday
-  g/L  0.05, how strongly price is pulled back to the average
+For small swings a pendulum follows  d²θ/dt² = -ω²θ.  Its energy ½v² + ½ω²θ² tells you how far
+the swing will go:  amplitude = √(θ² + v²/ω²).  Markets aren't a perfect pendulum, so friction
+lets the swing keep only 80% of that, and news can knock it off course completely.
 
-Buy when a swing bottoms out below -1.5 and sell where the formula says it turns on the
-other side. If no turning point exists (the swing would go over the top), the average has
+Buy when a swing bottoms out below -1.5 and sell when it reaches 80% of the predicted
+amplitude on the other side. If price runs past 3 standard deviations, the average has
 probably moved, so get out. Shorts are the mirror image.
 Rules were set using 2005-2015 and tested on 2016 onwards.""",
     "tickers": ["EURUSD=X"],
@@ -58,9 +58,9 @@ Rules were set using 2005-2015 and tested on 2016 onwards.""",
     "split_date": "2016-01-01",
     "settings": {
         "buy_rule": f"BUY IF {_T1} < {_T2} AND {_T} > {_T1} AND {_T} < -1.5",
-        "sell_rule": f"SELL IF ACOS({_ENERGY}) - {_T} < 0.2 OR {_ENERGY} < -1",
+        "sell_rule": f"SELL IF {_T} > {_TURN} OR {_T} < -3",
         "short_rule": f"SHORT IF {_T1} > {_T2} AND {_T} < {_T1} AND {_T} > 1.5",
-        "cover_rule": f"COVER IF ACOS({_ENERGY}) + {_T} < 0.2 OR {_ENERGY} < -1",
+        "cover_rule": f"COVER IF -({_T}) > {_TURN} OR {_T} > 3",
         "size_rule": "",
         "initial": 10000,
         "cost_pct": 0.02,
