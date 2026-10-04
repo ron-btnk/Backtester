@@ -1,88 +1,114 @@
 # Backtester
 
-A backtesting engine where you write trading rules as text, including formulas, and test them on any ticker from Yahoo Finance.
+I built a backtesting engine where you write trading rules as text and test them on any ticker from Yahoo Finance. Try it in your browser: https://backtester-rbtnk.streamlit.app/
 
-I mostly used it on EUR/USD to test my own ideas. All rules were designed on 2005-2015. I didn't touch 2016-2026 until the end, so that each idea got one honest test on data it had never seen.
+I tested some of my own strategies on EUR/USD. [Why EUR/USD?](#why-i-chose-to-focus-on-forexeurusdx)
 
-## Default study: does EUR/USD move like a pendulum?
+I tested 8 strategies, 2 of which worked. [How I dealt with the multiple testing problem](#how-i-dealt-with-the-multiple-testing-problem)
 
-Run all cells and press Enter to reproduce this.
+More on the strategies:
 
-The idea: treat the 60-day moving average as the bottom of a pendulum and price as the pendulum swinging around it.
+| Strategy | Idea | Result |
+|---|---|---|
+| 200-day trend | Long above the 200-day average, short below | Worked. About +26%, positive in both periods |
+| Rally then dip | Profit-takers cause a dip, latecomers buy it | Worked. About +31%, positive in both periods |
+| Break-even vs momentum | Size of the drop decides who wins at the old high | Mixed. Roughly flat, lost in training, gained in the test |
+| Pendulum | Price swings around its average like a pendulum | Failed. [Details](#the-pendulum-model) |
+| Short-term reversal | Buy after a down day, sell after an up day | Failed. About -48%, trades almost daily so costs kill it |
+| Failed breakouts | Bet against breakouts that reverse within days | Failed. About -42%, every nearby setting lost too |
+| Equilibrium mean reversion | Bet on a return to the average | Failed on 2005-2015 |
+| Break-even sellers | Old highs act as resistance, old lows as support | Failed on 2005-2015 |
 
-- θ = (price - MA60) / STD60, how far price is from the average
-- v = θ today - θ yesterday
-- Equation of motion: d²θ/dt² = -(g/L) sin θ
-- Energy is conserved, so the swing turns where θ = arccos(cos θ - v² / (2g/L))
+I designed every rule on 2005-2015 and tested it on 2016-2026. Buy and hold lost about 17% over that time. The last two failed in 2005-2015, so they never got to the test. [More on the two that worked](#the-two-that-worked)
 
-It buys at the bottom of a swing (below -1.5) and sells where the formula says the swing turns on the other side. If there is no turning point (the pendulum would go over the top), I take that as the equilibrium having moved and close the trade. Shorts are the mirror image.
+## The pendulum model
 
-The formulas go straight into the rules:
+It failed. I treated EUR/USD like a pendulum swinging around its 60-day average and wrote the physics into the trading rules as formulas. It did about as well as buy and hold and no better than random timing. [Why a pendulum?](#why-a-pendulum)
+
+| | Pendulum | Buy and hold |
+|---|---|---|
+| Total return | -15.8% | -17.1% |
+| Sharpe | -0.03 | -0.02 |
+| Max drawdown | -41.8% | -40.0% |
+| Trades | 96 | - |
+
+The angle is how far price is from its 60-day average in standard deviations, and the velocity is how much it changed since yesterday:
+
+$$\theta = \frac{P - \mathrm{MA}_{60}}{\mathrm{STD}_{60}} \qquad v = \theta_t - \theta_{t-1}$$
+
+For small swings the pendulum equation simplifies, and its energy stays constant:
+
+$$\frac{d^2\theta}{dt^2} = -\frac{g}{L}\sin\theta \approx -\omega^2\theta \qquad \frac{1}{2}v^2 + \frac{1}{2}\omega^2\theta^2 = \text{constant}$$
+
+That gives the amplitude A, how far the swing goes before it turns:
+
+$$A = \sqrt{\theta^2 + \frac{v^2}{\omega^2}}$$
+
+I set ω² = 0.01, a swing of about 63 days. The rule buys at the bottom of a swing (θ below -1.5) and sells when θ reaches 0.8A on the other side. The 0.8 is friction. If θ goes past 3 the average has probably moved, so the trade closes. Shorts are the mirror image. [The full rules and what went wrong](#the-pendulum-in-detail)
+
+## The pendulum in detail
+
+The formulas are typed straight into the rules:
 
 ```
 BUY   IF (PRICE[1] - MA60[1]) / STD60[1] < (PRICE[2] - MA60[2]) / STD60[2]
       AND (PRICE - MA60) / STD60 > (PRICE[1] - MA60[1]) / STD60[1]
       AND (PRICE - MA60) / STD60 < -1.5
-SELL  IF ACOS(COS((PRICE - MA60) / STD60) - ((PRICE - MA60) / STD60 - (PRICE[1] - MA60[1]) / STD60[1]) ^ 2 / (2 * 0.05)) - (PRICE - MA60) / STD60 < 0.2
-      OR COS((PRICE - MA60) / STD60) - ((PRICE - MA60) / STD60 - (PRICE[1] - MA60[1]) / STD60[1]) ^ 2 / (2 * 0.05) < -1
+SELL  IF (PRICE - MA60) / STD60 > 0.8 * SQRT(((PRICE - MA60) / STD60) ^ 2
+         + ((PRICE - MA60) / STD60 - (PRICE[1] - MA60[1]) / STD60[1]) ^ 2 / 0.01)
+      OR (PRICE - MA60) / STD60 < -3
 ```
 
-Before using real data I checked it on fake prices. On prices that actually swing like a pendulum it got a Sharpe of about 2.75. On random prices it got nothing. So if EUR/USD were a pendulum, the test would have picked it up.
+On fake prices that swing like a pendulum, this rule beat all 300 random strategies with a Sharpe ratio of about 4. On random prices it found nothing, so the test can tell a pendulum from noise. On EUR/USD it beat 44% of 300 random strategies, and 29% of 28 nearby settings beat buy and hold.
 
-Results on EUR/USD:
+It lost to buy and hold in 2005-2015 (Sharpe -0.13 against -0.07) and beat it in 2016-2026 (0.16 against 0.08). A rule that wins in one period and loses in the other looks like noise. It won 55% of its trades but lost money overall, with small wins and a few large losses. The worst trades were longs held for 4 to 8 months through long EUR/USD declines. In a slow decline the average falls with the price, so the pendulum probably never looks far enough from equilibrium to exit.
 
-| | Strategy | Buy & hold |
-|---|---|---|
-| Total return | -23.1% | -16.6% |
-| Sharpe | -0.23 | -0.02 |
-| Max drawdown | -26.6% | -40.0% |
-| Trades | 349 | - |
+The automatic search found a 48-day window that made +17.9% over the full period. On 2016-2026 alone it did worse than the original (Sharpe -0.03 against 0.16), so it was fitting the past.
 
-- 2005-2015: -13.9% vs -19.5% for buy & hold, so it beat it
-- 2016-2026: -10.7% vs +4.3%, so it lost
-- Costs took 11.5 points. It only beat buy & hold before costs
-- It beat 25% of 300 random strategies, so worse than random timing
-- Almost no nearby settings worked. There's one green square in the heatmap, in a corner on its own, which is a lucky spike rather than a real edge
+This is the second version. The first used the full equation with sin and arccos, which treats θ as an angle, but θ is measured in standard deviations, so that was an arbitrary choice. It also assumed the market conserves energy. That version lost 23.1% against 16.6% for buy and hold and beat 25% of random strategies. I rewrote it after the physics was criticised, not to improve the result, so the new version had one test of its own. Neither held up.
 
-The automatic search found "better" numbers on 2005-2015 (54-day window, gravity 0.062) that made +16.2% over the full period. But on 2016-2026 they still lost money. It was just fitting the past.
+## The two that worked
 
-So EUR/USD isn't a pendulum, or at least not one stable enough to trade.
+The 200-day rule is a classic trend rule, and studies of currencies in the 1980s and 90s found trend rules profitable. I fixed it before looking at any data, so it counts as one test and not as part of a search. Rally then dip is my own idea. Its sensitivity heatmap is green for every nearby setting, so it does not depend on exact numbers. For break-even vs momentum I saw the full period while building it, but I did not change the rules afterwards. Next I will run both survivors, unchanged, on other currency pairs.
 
-## Everything I tested
+## How the tests are built
 
-All on EUR/USD. Buy & hold lost about 17% over the full period.
+Signals use the close and trades happen at the next day's open, so there is no lookahead. Every trade pays a cost, and shorts pay a borrow fee. Rules are chosen on one period and tested on another. Each strategy is compared with 300 random ones that spend the same time long and short. Nearby settings are tested too, so a lucky spike shows up as one green square in a red heatmap.
 
-| Hypothesis | Idea | Result |
-|---|---|---|
-| Short-term reversal | Buy after a down day, sell after an up day | Failed, about -48%. Trades almost every day so costs kill it |
-| 200-day trend | Long above the 200-day average, short below | Worked, about +26%, positive in both periods |
-| Equilibrium mean reversion | Bet on a return to the average, exit if overstretched | Failed |
-| Break-even sellers | Old highs act as resistance, old lows as support | Failed |
-| Failed breakouts | Bet against breakouts that reverse within days | Failed, about -42%, every nearby setting lost too |
-| Break-even vs momentum | Size of the drop decides who wins at the old high | Mixed, roughly flat, lost in training and gained in the test |
-| Rally then dip | Profit-takers cause a dip, latecomers buy it | Worked, about +31%, positive in both periods |
-| Pendulum | Physics predicts where a swing turns | Failed |
+## Why I chose to focus on Forex/EURUSD=X
 
-The 200-day rule is the standard one from research on currency markets, so I picked it before seeing any data, which makes it less likely to be luck. Rally then dip was my own idea, and its whole heatmap is green, so it doesn't depend on one exact setting.
+EUR/USD is the most traded currency pair in the world. Trading it costs very little, so I assumed 0.02% per trade. There are 21 years of daily data and no earnings, dividends or stock splits, so a rule depends on price only. Central banks and companies hedging future payments trade currencies for reasons other than profit. If an edge exists it would come from them, which gives every idea a question to answer: who is on the other side of the trade, and why do they lose? Research also found that trend rules worked on currencies in the 1980s and 90s, so I could test a classic one, the 200-day rule, as a check on my own ideas.
 
-2 out of 8 could still partly be luck. The next step is running both, unchanged, on other currency pairs. For two of the ideas (break-even vs momentum and the pendulum) I did see the full period while building them, but I didn't change the rules after that.
+## Why a pendulum
 
-## How the tests stay realistic
+Looking at EUR/USD charts, price seemed to swing around a level and then go about as far on the other side. A pendulum does the same around its lowest point, and its equations predict where a swing turns. So I used them as the trading rule, with the 60-day average as the lowest point.
 
-- Signals use the close, trades happen at the next day's open, so no lookahead
-- Every trade pays a cost, shorts pay a borrow fee
-- Rules are chosen on one period and tested on another
-- Each strategy is compared to 300 random ones with the same time in the market
-- Nearby settings get tested too, to check the result isn't a lucky spike
+## How I dealt with the multiple testing problem
 
-## Custom backtest
+If you test enough strategies on the same data, some will work by luck. This is the multiple testing problem, also called data snooping.
 
-Type C at the start to test your own rules on any ticker.
+Say a useless rule has a 50% chance of beating buy and hold in one period, and the two periods are independent. This is a simplification, so the numbers show the size of the effect and not exact odds.
 
-- Quick mode: tickers, dates, rules and cost
-- Advanced mode: every setting, plus the train/test split, random benchmark, sensitivity check and a search for better numbers
+$$P(\text{at least one of } n \text{ useless rules wins one period}) = 1 - 0.5^n$$
 
-## Writing rules
+$$P(\text{one useless rule wins both periods}) = 0.5 \times 0.5 = 0.25$$
+
+$$P(\text{at least one of } n \text{ useless rules wins both periods}) = 1 - 0.75^n$$
+
+| Rules tested | At least one wins one period | At least one wins both periods | Expected winners in both |
+|---|---|---|---|
+| 1 | 50% | 25% | 0.25 |
+| 8 | 99.6% | 90.0% | 2.0 |
+| 10 | 99.9% | 94.4% | 2.5 |
+| 20 | >99.99% | 99.7% | 5.0 |
+
+Splitting the data into two periods helps a bit. With 8 useless rules, at least one still passes both periods 90% of the time. The expected number is 8 x 0.25 = 2, and I found 2. Getting 2 or more out of 8 happens about 63% of the time by luck, so passing both periods is not proof on its own.
+
+On top of the split I used the random benchmark and the sensitivity heatmap ([how the tests are built](#how-the-tests-are-built)). The 200-day rule was fixed in advance, so its chance of passing both periods by luck is 25%, not 90%. The strongest test still to do is other currency pairs, because a real effect should show up on data I did not design the rule on.
+
+## Write your own rules
+
+Quick mode asks for tickers, dates, rules and cost. Advanced mode adds every setting, plus the train/test split, random benchmark, sensitivity check and a search for better numbers.
 
 ```
 BUY IF PRICE > MA200
@@ -93,75 +119,28 @@ SHORT IF ZSCORE20 > 2
 COVER IF ZSCORE20 < 0
 ```
 
-- Indicators: PRICE, MA, EMA, STD, RSI, ZSCORE, VOL, HIGH, LOW, RETURN_ND, DIST_MA, DIST_HIGH, DIST_LOW, MACD, DRAWDOWN (add the window, e.g. MA60)
-- `PRICE[1]` means yesterday's price, `[2]` two days ago and so on
-- You can use `+ - * / ^`, brackets and SIN, COS, TAN, ASIN, ACOS, ATAN, ABS, SQRT, LOG, EXP
-- Combine conditions with AND / OR
-- Optional: position sizing, volatility target, stop loss, take profit
+Indicators are PRICE, MA, EMA, STD, RSI, ZSCORE, VOL, HIGH, LOW, RETURN_ND, DIST_MA, DIST_HIGH, DIST_LOW, MACD and DRAWDOWN, with a window added, for example MA60. `PRICE[1]` is yesterday's price and `PRICE[2]` the day before. Formulas can use `+ - * / ^`, brackets, and SIN, COS, TAN, ASIN, ACOS, ATAN, ABS, SQRT, LOG and EXP. Conditions combine with AND / OR. Position sizing, a volatility target, stop loss and take profit are optional.
 
-It prints a results table, a breakdown of the trades and a verdict, then shows the charts.
+## Run it yourself
 
-## How to run
+**Online:** https://backtester-rbtnk.streamlit.app/. Nothing to install, works on a phone. It runs on a small free server, so the heavy checks are slower, and it sleeps when nobody uses it, so the first load can take a minute.
 
-There are three ways to run it. All three use the same engine and give the same results.
-
-### 1. Jupyter notebook
+**Web app on your computer:** faster, and it never sleeps.
 
 ```
 cd ~\Desktop
 git clone https://github.com/ron-btnk/Backtester
 cd Backtester
 python -m pip install -r requirements.txt
-python -m notebook Backtester.ipynb
+python -m streamlit run app.py
 ```
 
-Run all cells, then press Enter for the default study or type C for your own rules.
+**Notebook:** same first four lines, then `python -m notebook Backtester.ipynb`. Run all cells, then press Enter for the pendulum or type C for your own rules. All the code is visible and editable.
 
-- Advantages: you see all the code and can change anything
-- Disadvantages: you need Python installed, and you work through text prompts instead of a proper interface
-
-### 2. Web app, run locally
-
-```
-cd ~\Desktop
-git clone https://github.com/ron-btnk/Backtester
-cd Backtester
-python -m pip install -r requirements.txt
-streamlit run app.py
-```
-
-It opens in your browser at `http://localhost:8501`. No code to look at, just a web page.
-
-- Advantages: faster than the hosted version, because it uses your own CPU and memory instead of a shared server. It doesn't go to sleep and doesn't depend on the hosted app being up
-- Disadvantages: you still need Python installed and have to clone the repo and install the dependencies first. It only runs on your machine while the command is running
-
-### 3. Web app, hosted on Streamlit Community Cloud
-
-https://backtester-rbtnk.streamlit.app/
-
-Open the link and it runs in your browser. It looks and works the same as the local web app.
-
-- Advantages: nothing to install, no Python needed, works on any device including a phone, and it's easy to share
-- Disadvantages: slower, because it runs on a small shared server. The heavy parts (300 random strategies, the sensitivity heatmap, the parameter search) take noticeably longer. The app also goes to sleep when nobody has used it for a while, so the first load can take a minute to wake up
-
-Use the hosted version to try it out, and run it locally if you're going to do a lot of backtests or use the advanced checks.
-
-## Web app
-
-The main page explains the pendulum study and has a button to run it. The sidebar is for your own backtest: pick quick or advanced mode, fill in the tickers, dates, rules and cost, and press Run backtest. Results show the return, Sharpe and max drawdown against buy & hold, the verdict, and tabs for charts, trades, train vs test and the robustness checks.
-
-The engine lives in `backtester.py`, which is the notebook's code without the prompts. `app.py` is the web page.
+The engine is in `backtester.py` and the web page in `app.py`. I built the web front end with Claude Code.
 
 ## Limitations
 
-- Daily data only
-- Yahoo's FX open prices aren't exact
-- Interest rates are ignored. Holding euros vs dollars earns different rates, which matters when shorting FX
-- Costs are a flat estimate, not real spreads
-- Only one currency pair so far
+Daily data only. Yahoo's FX open prices are not exact. Interest rates are ignored, and holding euros against dollars earns different rates, which matters when shorting FX. Costs are a flat estimate and not real spreads. Only one currency pair so far.
 
 Not financial advice.
-
-Try it in your browser: https://backtester-rbtnk.streamlit.app/
-
-The web front end is built with Streamlit, and I used Claude Code for it.
