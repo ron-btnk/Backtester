@@ -1,10 +1,20 @@
 # Backtester
 
-I built a backtesting engine where you write trading rules as text and test them on any ticker from Yahoo Finance. Try it in your browser: https://backtester-rbtnk.streamlit.app/
+I built a backtesting engine where you write trading rules as text and test them on any ticker from Yahoo Finance. It then checks whether the result is real or just luck. Try it in your browser: https://backtester-rbtnk.streamlit.app/
+
+![The 200-day trend rule on EUR/USD: when it was long and short, and its value against buy and hold](docs/trend_rule.png)
+
+What I built, in Python with pandas and numpy:
+
+- **A rule language.** You type `BUY IF (PRICE - MA60) / STD60 < -1.5 AND RSI14 > 30`. The text is parsed into a syntax tree and only maths, indicators and comparisons are allowed, so the public web app never runs what a visitor types as code. [Write your own rules](#write-your-own-rules)
+- **A day-by-day simulator.** It decides at the close and trades at the next day's open, so a rule cannot use a price it has not seen yet. It handles costs, shorting with borrow fees, position sizing, stop loss and take profit.
+- **Three checks against fooling myself.** A train/test split, 300 random strategies that hold for the same stretches at random dates, and a heatmap of nearby settings. [How the tests are built](#how-the-tests-are-built)
+- **A search for better numbers.** It tunes a rule on the first period only, then shows what happened on the second.
+- **Tests for the engine itself.** One scrambles the future prices and checks that nothing before them changes. [How the code is organised](#how-the-code-is-organised)
 
 I tested some of my own strategies on EUR/USD. [Why EUR/USD?](#why-i-chose-to-focus-on-forexeurusdx)
 
-I tested 8 strategies, 2 of which worked. [How I dealt with the multiple testing problem](#how-i-dealt-with-the-multiple-testing-problem)
+I tested 8 strategies, 2 of which worked. I report all 8, because the 6 that failed are part of the result. [How I dealt with the multiple testing problem](#how-i-dealt-with-the-multiple-testing-problem)
 
 More on the strategies:
 
@@ -60,6 +70,10 @@ SELL  IF (PRICE - MA60) / STD60 > 0.8 * SQRT(((PRICE - MA60) / STD60) ^ 2
 ```
 
 On fake prices that swing like a pendulum, this rule beat all 300 random strategies with a Sharpe ratio of about 4. On random prices it found nothing, so the test can tell a pendulum from noise. On EUR/USD it beat 44% of 300 random strategies, and 29% of 28 nearby settings beat buy and hold.
+
+![Left: the pendulum rule sits in the middle of 300 random strategies. Right: Sharpe for nearby settings, mostly red](docs/pendulum_checks.png)
+
+On the left, the blue line is the pendulum and the grey bars are the random strategies. It sits in the middle of them. On the right, each square is the same rule with slightly different numbers, and the black box is mine. Green beats buy and hold, and most of the squares are red.
 
 It lost to buy and hold in 2005-2015 (Sharpe -0.13 against -0.07) and beat it in 2016-2026 (0.16 against 0.08). A rule that wins in one period and loses in the other looks like noise. It won 55% of its trades but lost money overall, with small wins and a few large losses. The worst trades were longs held for 4 to 8 months through long EUR/USD declines. In a slow decline the average falls with the price, so the pendulum probably never looks far enough from equilibrium to exit.
 
@@ -128,16 +142,42 @@ Indicators are PRICE, MA, EMA, STD, RSI, ZSCORE, VOL, HIGH, LOW, RETURN_ND, DIST
 **Web app on your computer:** faster, and it never sleeps.
 
 ```
-cd ~\Desktop
 git clone https://github.com/ron-btnk/Backtester
 cd Backtester
 python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-**Notebook:** same first four lines, then `python -m notebook Backtester.ipynb`. Run all cells, then press Enter for the pendulum or type C for your own rules. All the code is visible and editable.
+**Notebook:** same first three lines, then `python -m notebook Backtester.ipynb`. Run all cells, then press Enter for the pendulum or type C for your own rules. All the code is visible and editable.
 
-The engine is in `backtester.py` and the web page in `app.py`. I built the web front end with Claude Code.
+## How the code is organised
+
+| File | What it does |
+|---|---|
+| `backtester.py` | The engine, about 1,300 lines. It reads top to bottom in the order a backtest runs |
+| `app.py` | The web page. I built this front end with Claude Code |
+| `Backtester.ipynb` | The same engine in a notebook, with typed prompts in place of the web page |
+| `tests/test_backtester.py` | Tests for the engine, on made-up prices so they need no internet |
+
+The main steps in `backtester.py`:
+
+| Step | Function | What happens |
+|---|---|---|
+| Read a rule | `parse_rule`, `evaluate` | Rule text becomes a syntax tree, then one number per day. Anything that is not maths, an indicator or a comparison is refused |
+| Simulate | `run_backtest` | One loop over the days. At the open it trades towards yesterday's target, at the close it reads the signals and sets tomorrow's |
+| Luck or skill | `random_benchmark` | Keeps the rule's holding periods, moves them to random dates 300 times and counts how many it beats |
+| Lucky numbers | `sensitivity` | Changes every number in the rule by up to 50% each way and reruns it |
+| Tune | `improve_rules` | Nudges one number at a time on the train period, then reports the test period |
+| Judge | `verdict` | Adds up the evidence into promising, mixed or doesn't hold up |
+
+To run the tests:
+
+```
+python -m pip install pytest
+python -m pytest
+```
+
+They check, among other things, that scrambling future prices changes nothing earlier, that a signal at the close is filled at the next open, that the profits of the trades add up to the change in the account, and that text like `__import__('os')` is refused as a rule.
 
 ## Limitations
 

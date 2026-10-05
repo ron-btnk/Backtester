@@ -1,4 +1,18 @@
-"""Backtesting engine, moved from Backtester.ipynb (without the input() prompts and main())."""
+"""Backtesting engine: trading rules written as text, tested on daily prices.
+
+A run goes through the sections of this file in order:
+  rule text -> syntax tree -> one True/False signal per day      (Rules and formulas)
+  signals -> day-by-day simulation with costs                    (Backtest engine)
+  equity curve -> return, Sharpe, drawdown, trade statistics     (Performance)
+  three checks that the result is not luck or overfitting        (Random benchmark, Parameter
+                                                                  sensitivity, train/test split)
+  a search for better numbers, judged on data it never saw       (Searching for better numbers)
+  a verdict that adds the evidence up                            (Analysis and verdict)
+
+Signals use the close and orders fill at the next day's open, so a rule never trades on a price
+it could not have seen. Backtester.ipynb holds the same code plus input() prompts, and app.py is
+the web front end.
+"""
 
 # ---- Setup ----
 
@@ -17,7 +31,7 @@ except ImportError:
     yf = None #if yfinance not installed -> program doesn't crash and only complains when you try download data
 
 TRADING_DAYS = 252 #rough number of days market is open per year
-WARMUP_DAYS = 500 #extra calendar days downloaded before start date -> more on this in cell 2
+WARMUP_DAYS = 500 #extra calendar days downloaded before start date -> more on this in load_prices
 RANDOM_RUNS = 300 #random strategies benchmark creates to compare against strategy
 SENSITIVITY_STEPS = [0.5, 0.75, 1.0, 1.25, 1.5]
 TUNE_STEPS = [0.8, 0.9, 1.0, 1.1, 1.25]  # how far each number is nudged when searching for better rules
@@ -249,8 +263,12 @@ def parse_rule(text):
 
 
 def evaluate(formula, close, cache=None):
-    # turns text like "(PRICE - MA60) / STD60" into a series of values, one per day
+    # turns text like "(PRICE - MA60) / STD60" into a series of values, one per day.
+    # The text is parsed into a syntax tree and only the node types below are accepted, so nothing
+    # a user types is ever executed. The cache keeps indicators and whole formulas that repeat
     cache = {} if cache is None else cache
+    if ("formula", formula) in cache:
+        return cache[("formula", formula)]
     try:
         tree = ast.parse(formula.replace("^", "**"), mode="eval").body
     except SyntaxError:
@@ -290,7 +308,8 @@ def evaluate(formula, close, cache=None):
         result = calc(tree)
     if not isinstance(result, pd.Series):
         result = pd.Series(result, index=close.index)
-    return result.replace([np.inf, -np.inf], np.nan)
+    cache[("formula", formula)] = result.replace([np.inf, -np.inf], np.nan)
+    return cache[("formula", formula)]
 
 
 def _condition(left, op, right, close, cache=None):
@@ -312,12 +331,13 @@ def _condition(left, op, right, close, cache=None):
     return (result & valid).fillna(False).astype(bool)
 
 
-def build_signal(rule_text, close):
+def build_signal(rule_text, close, cache=None):
+    # True on the days the rule fires: conditions joined by AND form a group, groups are joined by OR
     groups = parse_rule(rule_text)
     signal = pd.Series(False, index=close.index)
     if groups is None:
         return signal
-    cache = {}
+    cache = {} if cache is None else cache
     for conditions in groups:
         group_signal = pd.Series(True, index=close.index)
         for left, op, right in conditions:
@@ -392,11 +412,15 @@ def _trade_record(trade, exit_date, reason, status, extra=0.0):
 def run_backtest(prices, start, end, buy_rule, sell_rule, initial, cost_pct=0.1, position_pct=100.0,
                  stop_loss_pct=None, take_profit_pct=None, size_rule="", target_vol_pct=None,
                  rebalance_pct=10.0, short_rule="", cover_rule="", short_fee_pct=0.0):
+    # Signals are worked out on the whole history, warm-up included, then cut to start..end.
+    # Each day has two steps: at the open, trade towards the target set the evening before;
+    # at the close, read the signals and set the target for tomorrow.
     close_all = prices["Close"]
-    buy_all = build_signal(buy_rule, close_all)
-    sell_all = build_signal(sell_rule, close_all)
-    short_all = build_signal(short_rule, close_all)
-    cover_all = build_signal(cover_rule, close_all)
+    cache = {}  # the four rules usually share indicators and formulas, so work each out once
+    buy_all = build_signal(buy_rule, close_all, cache)
+    sell_all = build_signal(sell_rule, close_all, cache)
+    short_all = build_signal(short_rule, close_all, cache)
+    cover_all = build_signal(cover_rule, close_all, cache)
     strength_all = size_strength(size_rule, close_all)
     if target_vol_pct:
         vol = get_indicator("VOL20", close_all)
@@ -523,8 +547,6 @@ def run_backtest(prices, start, end, buy_rule, sell_rule, initial, cost_pct=0.1,
         "metrics": performance(strategy, initial),
         "bh_metrics": performance(buy_hold, initial),
         "stats": trade_stats(trades_df, weight_series),
-        "yearly": period_returns(strategy, buy_hold, "Y"),
-        "monthly": period_returns(strategy, buy_hold, "M"),
     }
 
 
@@ -629,6 +651,8 @@ def _total_and_sharpe(returns):
 
 
 def random_benchmark(result, cost_pct, short_fee_pct=0.0, runs=RANDOM_RUNS, seed=42):
+    # was the timing skill or luck? Keep the strategy's holding periods (same lengths, same long or
+    # short) but drop them at random dates, many times over, and see how many of those it beats
     weights = result["weights"]
     blocks = _holding_blocks(weights)
     if not blocks:
@@ -747,28 +771,33 @@ def rules_with(settings, dials, values):
     return rules
 
 
-def sensitivity(prices, start, end, settings):
+def sensitivity(prices, start, end, settings, full):
+    # does the result depend on exact numbers? Move each number in the rules up and down, one at a
+    # time, then the first two together as a grid. full is the backtest of the rules as written
     dials = rule_dials(settings)
     if not dials:
         return None
     original = {dial: dial[1] for dial in dials}
+    bh_sharpe = full["bh_metrics"]["sharpe"]
+    original_sharpe = full["metrics"]["sharpe"]
+    tried = {tuple(original.values()): original_sharpe}  # the grid repeats some single-number trials
 
     def sharpe_with(changes):
-        trial = {**settings, **rules_with(settings, dials, {**original, **changes})}
-        try:
-            return run_backtest(prices, start, end, **trial)["metrics"]["sharpe"]
-        except Exception:
-            return np.nan
-
-    baseline = run_backtest(prices, start, end, **settings)
-    bh_sharpe = baseline["bh_metrics"]["sharpe"]
-    original_sharpe = baseline["metrics"]["sharpe"]
+        values = {**original, **changes}
+        key = tuple(values.values())
+        if key not in tried:
+            try:
+                trial = {**settings, **rules_with(settings, dials, values)}
+                tried[key] = run_backtest(prices, start, end, **trial)["metrics"]["sharpe"]
+            except Exception:
+                tried[key] = np.nan
+        return tried[key]
 
     rows, neighbours = [], []
     for dial, members in dials.items():
         param = members[0][1]
         values = parameter_values(param)
-        sharpes = [original_sharpe if v == dial[1] else sharpe_with({dial: v}) for v in values]
+        sharpes = [sharpe_with({dial: v}) for v in values]
         rows.append({"label": dial_label(dial, members), "values": values, "sharpes": sharpes,
                      "original": dial[1]})
         neighbours += [s for v, s in zip(values, sharpes) if v != dial[1] and not np.isnan(s)]
@@ -790,18 +819,24 @@ def sensitivity(prices, start, end, settings):
 # ---- Searching for better numbers ----
 
 def improve_rules(prices, start, end, settings, split_date, full, test, min_trades=10):
+    # nudge one number at a time and keep a change if it raises the Sharpe. The search only sees
+    # the train period, so the test period can show whether "better" was just fitting the past
     dials = rule_dials(settings)
     if not dials:
         return None
     pick_end = split_date or end
+    scores = {}  # later passes come back to settings already tried
 
     def score(values):
-        trial = {**settings, **rules_with(settings, dials, values)}
-        try:
-            r = run_backtest(prices, start, pick_end, **trial)
-        except Exception:
-            return None
-        return r["metrics"]["sharpe"] if r["stats"]["trades"] >= min_trades else None
+        key = tuple(values.values())
+        if key not in scores:
+            trial = {**settings, **rules_with(settings, dials, values)}
+            try:
+                r = run_backtest(prices, start, pick_end, **trial)
+                scores[key] = r["metrics"]["sharpe"] if r["stats"]["trades"] >= min_trades else None
+            except Exception:
+                scores[key] = None
+        return scores[key]
 
     original = {dial: dial[1] for dial in dials}
     best_values = dict(original)
@@ -844,7 +879,7 @@ def analyse_ticker(prices, start, end, settings, split_date=None, advanced=True)
             train = run_backtest(prices, start, split_date, **settings)
             test = run_backtest(prices, split_date, end, **settings)
         random = random_benchmark(full, settings["cost_pct"], settings.get("short_fee_pct", 0.0))
-        sens = sensitivity(prices, start, end, settings)
+        sens = sensitivity(prices, start, end, settings, full)
         variants = improve_rules(prices, start, end, settings, split_date, full, test)
     label, notes = verdict(full, no_cost, train, test, random, sens)
     return {"full": full, "no_cost": no_cost, "train": train, "test": test, "random": random,
@@ -852,6 +887,7 @@ def analyse_ticker(prices, start, end, settings, split_date=None, advanced=True)
 
 
 def verdict(full, no_cost=None, train=None, test=None, random=None, sens=None):
+    # every check adds or removes points, and the checks that are hardest to pass by luck count double
     s, b, st = full["metrics"], full["bh_metrics"], full["stats"]
     notes, score = [], 0
 
@@ -1037,8 +1073,8 @@ def print_report(ticker, r):
             print(f"  {row['label']:22}" + "   ".join(cells))
 
     if r["advanced"]:
-        yearly = full["yearly"].rename(columns={"strategy_%": "Strategy %", "buy_hold_%": "Buy & hold %",
-                                                "difference_%": "Difference"})
+        yearly = period_returns(full["strategy"], full["buy_hold"], "Y").rename(columns={
+            "strategy_%": "Strategy %", "buy_hold_%": "Buy & hold %", "difference_%": "Difference"})
         print("\nBy year")
         print(indent(yearly.to_string(), 2))
 
@@ -1251,40 +1287,6 @@ def plot_checks(ticker, r):
 
 
 # ---- Input ----
-
-def _is_none(text):
-    return text.strip().upper() in ("", "NONE", "N")
-
-
-def as_yes(text):
-    return text.strip().lower().startswith("y")
-
-
-def as_date(text):
-    return pd.Timestamp(text).strftime("%Y-%m-%d")
-
-
-def as_optional_date(text):
-    return None if _is_none(text) else as_date(text)
-
-
-def as_positive(text):
-    value = float(text)
-    if value <= 0:
-        raise ValueError("must be above 0")
-    return value
-
-
-def as_optional_positive(text):
-    return None if _is_none(text) else as_positive(text)
-
-
-def as_non_negative(text):
-    value = float(text)
-    if value < 0:
-        raise ValueError("can't be negative")
-    return value
-
 
 def as_tickers(text):
     return [t.strip().upper() for t in text.split(",") if t.strip()]
