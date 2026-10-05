@@ -273,8 +273,8 @@ def trades_tab(full):
         by_reason.columns = ["Side", "Exit reason", "Trades", "Avg return %", "Total profit"]
         left.caption("Exits by reason")
         left.dataframe(by_reason, hide_index=True, width="stretch")
-    yearly = full["yearly"].rename(columns={"strategy_%": "Strategy %", "buy_hold_%": "Buy & hold %",
-                                            "difference_%": "Difference"})
+    yearly = bt.period_returns(full["strategy"], full["buy_hold"], "Y").rename(columns={
+        "strategy_%": "Strategy %", "buy_hold_%": "Buy & hold %", "difference_%": "Difference"})
     yearly.index = yearly.index.astype(str)
     yearly.index.name = "Year"
     right.caption("By year")
@@ -310,7 +310,8 @@ def robustness_tab(ticker, r):
         st.write("Not available: the rules never opened a position.")
     else:
         st.write(f"Beat **{rnd['sharpe_beaten_pct']:.0f}%** of {rnd['runs']} random strategies that spent "
-                 f"the same time in the market (median random return {rnd['random_median_return']:.2f}%).")
+                 f"the same time in the market, ranked by Sharpe (median random return "
+                 f"{rnd['random_median_return']:.2f}%).")
 
     st.markdown("##### Sensitivity")
     if sens is None:
