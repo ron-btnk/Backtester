@@ -94,7 +94,9 @@ def sidebar_inputs():
     tickers = sb.text_input("Tickers", ", ".join(d["tickers"]),
                             help="Yahoo Finance symbols, separated by commas. E.g. EURUSD=X, SPY, AAPL")
     left, right = sb.columns(2)
-    start = left.date_input("Start date", pd.Timestamp(d["start"]).date(), min_value=date(1970, 1, 1))
+    # without max_value Streamlit stops the picker 10 years after the default date
+    start = left.date_input("Start date", pd.Timestamp(d["start"]).date(), min_value=date(1970, 1, 1),
+                            max_value=date.today())
     end = right.date_input("End date", date.today(), min_value=date(1970, 1, 1))
 
     settings = {
@@ -133,7 +135,8 @@ def sidebar_inputs():
         if sb.checkbox("Train/test split", value=True,
                        help="Rules are judged separately before and after this date."):
             split_date = sb.date_input("Split date", pd.Timestamp(d["split_date"]).date(),
-                                       min_value=date(1970, 1, 1))
+                                       min_value=date(1970, 1, 1), max_value=date.today(),
+                                       help="Must be after the start date and before the end date.")
     else:
         sb.caption("Quick mode uses 10,000 starting money, fully invested, no stops.")
 
@@ -180,8 +183,9 @@ def check_inputs(tickers, start, end, settings, split_date):
     except Exception as e:
         problems.append(f"**Sizing rule**: {e}")
 
-    if split_date and not (start < split_date < end):
-        problems.append("**Split date**: it must fall between the start and end date.")
+    if split_date and start < end and not (start < split_date < end):
+        problems.append(f"**Split date**: {split_date} is not between the start date ({start}) and the end date "
+                        f"({end}). Move the split date, or untick *Train/test split* to use any start date.")
 
     iso = lambda day: day.isoformat() if day else None
     return (tickers, iso(start), iso(end), settings, iso(split_date)), problems
