@@ -340,7 +340,7 @@ def test_a_portfolio_trades_every_ticker_out_of_one_account():
     data = {f"T{seed}": random_prices(seed) for seed in (1, 2, 3, 4)}
     data["LATE"] = random_prices(9, days=900, first_day="2016-01-01")  # listed a year into the test
     data["TINY"] = random_prices(8, days=10, first_day="2016-01-01")  # too few days to test
-    result = bt.run_portfolio(data, START, END, **LONG_ONLY)
+    result = bt.run_portfolio(data, START, END, **LONG_ONLY, allocation="equal")
     trades = result["trades"]
     assert result["tickers"] == ["T1", "T2", "T3", "T4", "LATE"] and [t for t, _ in result["skipped"]] == ["TINY"]
     assert set(trades["ticker"]) == set(result["tickers"])
@@ -359,9 +359,88 @@ def test_money_is_split_into_equal_slices_or_spread_over_open_positions():
     data = {"UP": flat_prices() * 2, "A": flat_prices(), "B": flat_prices(), "C": flat_prices()}
     rule = {**ALWAYS_LONG, "buy_rule": "BUY IF PRICE > 150"}
     invested = lambda **how: bt.run_portfolio(data, *FLAT, **rule, **how)["weights"].iloc[-1]
-    assert invested() == pytest.approx(0.25)  # an equal slice each, the other three stay in cash
-    assert invested(max_weight_pct=60) == pytest.approx(0.60)  # all of it to the open position, up to the cap
-    assert invested(max_weight_pct=100) == pytest.approx(1.0)
+    assert invested(allocation="equal") == pytest.approx(0.25)  # an equal slice each, the other three stay in cash
+    assert invested(allocation="spread", max_weight_pct=60) == pytest.approx(0.60)  # all to the open position, up to the cap
+    assert invested(allocation="spread") == pytest.approx(1.0)
+    with pytest.raises(ValueError):
+        invested(allocation="by magic")
+
+
+# ---- The smart split ----
+
+def cycle_prices(pattern, cycles=150, first_day="2013-01-01"):
+    # the same few daily moves over and over, so every signal of a rule ends the same way
+    return make_prices(100 * np.cumprod(1 + np.tile(pattern, cycles)), first_day)
+
+
+# "buy after an up day, sell after a down day" wins on a price that moves in runs and loses on one that zigzags
+RUNS, ZIGZAG = [0.01, 0.01, 0.01, -0.01, -0.01, -0.01], [0.01, -0.01]
+FOLLOW = {"buy_rule": "BUY IF PRICE > PRICE[1]", "sell_rule": "SELL IF PRICE < PRICE[1]", "initial": 10000,
+          "cost_pct": 0.0, "rebalance_pct": 100}
+CYCLE = ("2013-03-01", "2015-06-01")
+
+
+def test_expected_edge_is_the_kelly_formula_on_a_record_mixed_with_everyone_elses():
+    assert bt.expected_edge([0, 0, 0.0, 0.0], [10, 6, 0.3, 0.1]) is None  # too few signals closed to say anything
+    assert bt.expected_edge([0, 0, 0.0, 0.0], [50, 50, 1.0, 0.0]) is None  # no loss yet, so no odds
+    everyone = [200, 120, 120 * 0.04, 80 * 0.02]  # 60% winners, wins of 4%, losses of 2%
+    chance, win, loss, share = bt.expected_edge([0, 0, 0.0, 0.0], everyone)  # no record of its own: the average ticker
+    assert (chance, win, loss) == pytest.approx((0.6, 0.04, 0.02))
+    assert share == pytest.approx(0.6 / 0.02 - 0.4 / 0.04)
+    # a ticker with a long losing record of its own is judged mostly on that
+    chance, _, _, share = bt.expected_edge([400, 100, 100 * 0.04, 300 * 0.02], everyone)
+    assert 0.25 < chance < 0.35 and share < 0
+    # and one with only a few signals is still close to the average
+    assert bt.expected_edge([5, 0, 0.0, 5 * 0.02], everyone)[0] == pytest.approx((60 + 0) / 105)
+
+
+def test_smart_split_moves_the_money_to_where_the_rule_has_worked():
+    data = {"RUNS": cycle_prices(RUNS), "ZIGZAG": cycle_prices(ZIGZAG, cycles=450)}
+    smart = bt.run_portfolio(data, *CYCLE, **FOLLOW, allocation="smart", max_weight_pct=100)
+    equal = bt.run_portfolio(data, *CYCLE, **FOLLOW, allocation="equal")
+    table = smart["shares"].set_index("Ticker")
+    # every RUNS signal won and every ZIGZAG one lost. RUNS still shows well under 100% because its
+    # record is mixed with the record of both tickers together, most of which is ZIGZAG's losses
+    assert table.loc["RUNS", "Win chance %"] > 55 and table.loc["ZIGZAG", "Win chance %"] < 15
+    assert table.loc["RUNS", "Kelly share %"] > 0 > table.loc["ZIGZAG", "Kelly share %"]
+    assert table.loc["ZIGZAG", "Share now %"] == 0 and table.loc["RUNS", "Share now %"] == 100
+    # the losing ticker is still watched, but no more money goes into it once its record is known
+    lost_on = lambda r: (r["trades"]["ticker"] == "ZIGZAG").sum()
+    assert 0 < lost_on(smart) < lost_on(equal) / 5
+    assert smart["metrics"]["total_return"] > equal["metrics"]["total_return"]
+    assert smart["gross"].max() < 1.02  # never more than the account
+
+
+def test_smart_split_starts_equal_until_enough_signals_have_closed():
+    data = {"RUNS": cycle_prices(RUNS), "ZIGZAG": cycle_prices(ZIGZAG, cycles=450)}
+    smart = bt.run_portfolio(data, "2013-03-01", "2013-04-15", **FOLLOW, allocation="smart", max_weight_pct=100)
+    assert "Kelly share %" not in smart["shares"].columns  # about a dozen signals: no record to go on yet
+    assert set(smart["shares"]["Share now %"]) == {50.0}
+
+
+def test_smart_split_counts_two_positions_that_move_together_as_one_bet():
+    # TWIN is a copy of RUNS. OTHER has the same record but its runs come on different days
+    shifted = RUNS[3:] + RUNS[:3]
+    data = {"RUNS": cycle_prices(RUNS), "TWIN": cycle_prices(RUNS), "OTHER": cycle_prices(shifted)}
+    table = bt.run_portfolio(data, *CYCLE, **FOLLOW, allocation="smart", max_weight_pct=100)["shares"].set_index("Ticker")
+    assert table["Avg share %"]["RUNS"] == pytest.approx(table["Avg share %"]["TWIN"], abs=0.5)
+    assert table["Avg share %"]["OTHER"] > 1.3 * table["Avg share %"]["RUNS"]
+
+
+def test_smart_split_cannot_see_the_future():
+    data = {f"T{seed}": random_prices(seed) for seed in (1, 2, 3, 4)}
+    cut = data["T1"].index.get_loc(pd.Timestamp("2017-06-01"))
+    noise = np.random.default_rng(2).uniform(0.5, 1.5, (len(data["T1"]) - cut, 1))
+    scrambled = {}
+    for name, prices in data.items():
+        scrambled[name] = prices.copy()
+        scrambled[name].iloc[cut:] *= noise
+    before = slice(None, data["T1"].index[cut - 1])
+    a = bt.run_portfolio(data, START, END, **LONG_SHORT, allocation="smart")
+    b = bt.run_portfolio(scrambled, START, END, **LONG_SHORT, allocation="smart")
+    assert "Kelly share %" in a["shares"].columns and len(a["strategy"][before]) > 500
+    assert np.allclose(a["strategy"][before], b["strategy"][before])
+    assert a["trades"]["profit"].sum() == pytest.approx(a["metrics"]["final"] - 10000, abs=0.01 * len(a["trades"]))
 
 
 def test_scan_gives_one_row_per_ticker_and_names_the_ones_it_could_not_test():
@@ -378,10 +457,16 @@ def test_scan_gives_one_row_per_ticker_and_names_the_ones_it_could_not_test():
 def test_portfolio_analysis_runs_and_gives_a_verdict():
     data = {f"T{seed}": random_prices(seed) for seed in (1, 2, 3)}
     settings = {**bt.QUICK_DEFAULTS, **LONG_ONLY}
-    r = bt.analyse_portfolio(data, START, END, settings, split_date="2017-01-01", max_weight_pct=50)
+    r = bt.analyse_portfolio(data, START, END, settings, split_date="2017-01-01")
     assert r["portfolio"] and r["label"] in ("promising", "mixed", "doesn't hold up")
     assert r["train"]["end"] < r["test"]["start"] and r["random"] is None and r["sens"] is None
     assert any(note.startswith("Filled a day late") for note in r["notes"])
+    # a portfolio is split by the app unless told otherwise, and says what equal slices would have made
+    assert r["full"]["allocation"] == "smart" and r["equal"]["allocation"] == "equal"
+    assert "Equal slices made" in r["notes"][-1]
+    plain = bt.analyse_portfolio(data, START, END, settings, allocation="spread", max_weight_pct=50)
+    assert plain["full"]["allocation"] == "spread" and plain["equal"] is not None
+    assert bt.analyse_portfolio(data, START, END, settings, allocation="equal")["equal"] is None
 
 
 def test_sp500_comparison_holds_the_fund_over_the_same_days(prices):

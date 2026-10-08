@@ -78,14 +78,39 @@ COVER IF ZSCORE20 < 0
   fill during the day at their level, or at the open if the price jumped past it overnight. After
   one of them closes a trade, the rule has to switch off and on again before it re-enters
 - **Several tickers** are tested one by one, each with the full starting money, or as one portfolio
-  that shares it
+  that shares it. A portfolio's money is split by the app: more goes to the tickers where the rule's
+  earlier signals paid off more often, less to positions that move together
 
 Signals use the close and trades happen at the next day's open. Dividends are paid into the account.
 """
 
 OWN_TICKERS = "My own tickers"
 SEPARATE, SHARED = "Each ticker on its own", "One shared portfolio"
-EQUAL, SPREAD = "An equal slice per ticker", "Spread over open positions"
+SPLITS = {"Decided by the app": "smart", "An equal slice per ticker": "equal",
+          "Spread over open positions": "spread"}
+HOW_SPLIT = {"smart": "split by the app, with more where the rule's record says a profit is likelier",
+             "equal": "split into an equal slice each", "spread": "spread equally over the open positions"}
+SMART_SPLIT = f"""
+The app decides how much of the account each ticker gets, from what it knew on each day:
+
+1. **How likely is a profit?** For every ticker it looks at how the rule's earlier signals ended: how
+   often they won, and how big the wins and losses were. A ticker's own record is short, so it is mixed
+   with the record of all the tickers together. A ticker needs {bt.KELLY_PRIOR} signals of its own before
+   its record counts as much as everyone's.
+2. **How much to bet?** The Kelly formula turns that into the share of the money that grows it fastest:
+   *chance of a win ÷ average loss − chance of a loss ÷ average win*. The app bets half of it, because
+   the inputs are estimates. When the wins don't pay for the losses the answer is negative and the ticker
+   gets nothing. Its signals are still followed on paper, so it can earn its way back.
+3. **Is it the same bet twice?** Positions that moved together over the last {bt.OVERLAP_DAYS} days are
+   cut, so that two copies of one bet don't get double the money.
+4. **Is there enough money?** If the shares add up to more than the account they are scaled down to fit.
+   Nothing is borrowed, and no ticker gets more than twice an equal slice unless you set another limit.
+
+Until {bt.KELLY_MIN_SIGNALS} signals have closed there is no record, and every ticker gets the same.
+
+This rests on one assumption: that a rule which has worked on a ticker will keep working there. That is
+often not true, so the result always shows what equal slices would have made.
+"""
 SURVIVORS = ("These are today's S&P 500 members. Companies that went bust or were dropped along the way are "
              "missing, so every number here, buy & hold included, looks better than it could have been in "
              "real time. Compare the rule with holding the same stocks, not with the index.")
@@ -166,14 +191,23 @@ def sidebar_inputs():
                                      f"({bt.SP500_FUND}, dividends reinvested) to the numbers and charts.")
 
     split_date = max_weight_pct = None
+    allocation = "smart"
+    if portfolio and not advanced:
+        sb.caption("The app decides how much each ticker gets, from how the rule has done on it so far. "
+                   "Advanced mode has other ways to split the money.")
     if advanced:
         if portfolio:
-            if sb.radio("Split the money", [EQUAL, SPREAD],
-                        help="Equal slices: each ticker may use its share and the rest waits in cash. "
-                             "Spread: the money is shared by the tickers that have a position open, "
-                             "so more of it is at work when few signals are on.") == SPREAD:
-                max_weight_pct = sb.number_input("Most in one ticker (%)", min_value=1.0, max_value=100.0,
-                                                 value=float(d["max_weight_pct"]), step=5.0)
+            allocation = SPLITS[sb.radio(
+                "Split the money", list(SPLITS),
+                help="Decided by the app: more to the tickers where the rule's earlier signals paid off "
+                     "more often, less to positions that move together. Equal slices: every ticker may "
+                     "use the same share and the rest waits in cash. Spread: shared equally by the "
+                     "tickers that have a position open.")]
+            if allocation != "equal":
+                max_weight_pct = sb.number_input(
+                    "Most in one ticker (%)", min_value=1.0, max_value=100.0, step=5.0,
+                    value=float(d["max_weight_pct"]) if allocation == "spread" else None, placeholder="automatic",
+                    help="Left empty, no ticker gets more than twice an equal slice.")
         settings["short_fee_pct"] = sb.number_input(
             "Borrow fee (% per year)", min_value=0.0, value=float(d["short_fee_pct"]), step=0.1,
             help="Paid on short positions. About 0 for FX, 0.5 for stocks.")
@@ -215,7 +249,7 @@ def sidebar_inputs():
     run = sb.button("Run backtest", type="primary", width="stretch")
     return run, {"tickers": tickers, "universe": universe, "start": start, "end": end, "settings": settings,
                  "split_date": split_date, "advanced": advanced, "portfolio": portfolio,
-                 "max_weight_pct": max_weight_pct, "compare_sp500": compare_sp500}
+                 "allocation": allocation, "max_weight_pct": max_weight_pct, "compare_sp500": compare_sp500}
 
 
 def has_rule(text):
@@ -289,7 +323,8 @@ def analyse(inputs, status=None):
             status("Trading the portfolio", 0, len(data))
         try:
             study["result"] = bt.analyse_portfolio(data, start, end, settings, inputs["split_date"],
-                                                   inputs["advanced"], inputs["max_weight_pct"], study["fund"])
+                                                   inputs["advanced"], inputs["allocation"],
+                                                   inputs["max_weight_pct"], study["fund"])
         except Exception as e:
             study["result"] = None
             study["failed"].append(("Portfolio", str(e)))
@@ -313,7 +348,7 @@ def pendulum_study(end):
     d = bt.DEFAULT_STUDY
     return analyse({"tickers": d["tickers"], "universe": None, "start": d["start"], "end": end,
                     "settings": dict(d["settings"]), "split_date": d["split_date"], "advanced": True,
-                    "portfolio": False, "max_weight_pct": None, "compare_sp500": False})
+                    "portfolio": False, "allocation": "smart", "max_weight_pct": None, "compare_sp500": False})
 
 
 def pct(x, digits=1):
@@ -511,25 +546,57 @@ def show_ticker(ticker, r, study):
         robustness_tab(ticker, r)
 
 
+def split_tab(r):
+    full, equal = r["full"], r["equal"]
+    if equal is not None:
+        ours, theirs = full["metrics"], equal["metrics"]
+        st.dataframe(pd.DataFrame({
+            "This split": [pct(ours["total_return"]), f"{ours['sharpe']:.2f}", pct(ours["max_drawdown"]),
+                           pct(full["stats"]["avg_invested"], 0)],
+            "Equal slices": [pct(theirs["total_return"]), f"{theirs['sharpe']:.2f}", pct(theirs["max_drawdown"]),
+                             pct(equal["stats"]["avg_invested"], 0)],
+        }, index=["Total return", "Sharpe", "Max drawdown", "Invested on average"]), width="stretch")
+        st.caption("The same rules and the same tickers, with only the split changed. If this split is not "
+                   "better than equal slices, it was not worth its complexity here.")
+    table = full["shares"]
+    if full["allocation"] == "smart":
+        if "Kelly share %" in table.columns:
+            st.caption("What the split is based on at the end of the test. Win chance and the average win and "
+                       "loss come from how the rule's signals ended on each ticker, mixed with the record of "
+                       "all tickers. Kelly share is what the formula would bet before it is halved, cut for "
+                       "overlap and scaled to fit the account. Negative means no money.")
+        else:
+            st.caption(f"Fewer than {bt.KELLY_MIN_SIGNALS} signals closed during the test, so there was no "
+                       "record to go on and every ticker got the same.")
+    st.dataframe(table, hide_index=True, width="stretch", height=420)
+    if full["allocation"] == "smart":
+        with st.expander("How the app decides"):
+            st.markdown(SMART_SPLIT)
+
+
 def show_portfolio(study):
     r = study["result"]
     if r is None:
         return
     full = r["full"]
-    how = (f"spread over open positions, at most {study['max_weight_pct']:g}% each" if study["max_weight_pct"]
-           else "an equal slice each")
+    how = HOW_SPLIT[full["allocation"]]
+    if study["max_weight_pct"] and full["allocation"] != "equal":
+        how += f", at most {study['max_weight_pct']:g}% in one ticker"
     st.subheader(f"Portfolio of {len(full['tickers'])} tickers, {full['start']} to {full['end']}")
-    st.caption(f"One account of {full['initial']:,.0f} trades every ticker with the same rules, {how}. It is "
-               f"compared with splitting the money equally over the same tickers and never selling.")
+    st.caption(f"One account of {full['initial']:,.0f} trades every ticker with the same rules. The money is "
+               f"{how}. The result is compared with putting the money equally into the same tickers and "
+               "never selling.")
     for ticker, reason in full["skipped"]:
         st.caption(f"Left out {ticker}: {reason}.")
     show_metrics(r)
     show_verdict(r, study["settings"])
 
-    charts, by_ticker, trades, train_test, robustness = st.tabs(
-        ["Charts", "By ticker", "Trades", "Train vs test", "Robustness checks"])
+    charts, split, by_ticker, trades, train_test, robustness = st.tabs(
+        ["Charts", "How the money was split", "By ticker", "Trades", "Train vs test", "Robustness checks"])
     with charts:
         show_figure(bt.plot_portfolio(r, study["split_date"]))
+    with split:
+        split_tab(r)
     with by_ticker:
         st.caption("Where the money was made. Buy & hold profit is what simply holding that ticker's "
                    "equal share of the money made.")

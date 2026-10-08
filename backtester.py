@@ -42,6 +42,12 @@ BAD_TICK_SIZE = 8 #a forex close this many times the usual daily move, undone th
 BAD_TICK_UNDONE = 0.25 #"undone" = the next close is back within this share of the jump
 MAX_DETAILED = 5 #with more tickers than this, each gets one quick backtest and the full checks run on request
 SP500_FUND = "SPY" #what "compare to the S&P 500" buys: a fund that holds the index and pays its dividends
+KELLY_FRACTION = 0.5 #a smart portfolio bets half of what the Kelly formula says, because its inputs are only estimates
+KELLY_PRIOR = 100 #a ticker's own record is mixed with this many signals' worth of the record of all tickers together
+KELLY_MIN_SIGNALS = 20 #signals that must have closed before the record is used at all
+OVERLAP_DAYS = 60 #days of price moves used to see which positions move together
+BIG_PORTFOLIO = 50 #with more tickers than this, a smart portfolio waits a few days between working out its split
+REALLOCATE_DAYS = 21 #a smart portfolio works its split out again at least this often, and measures overlap this often
 RANDOM_RUNS = 300 #random strategies benchmark creates to compare against strategy
 SENSITIVITY_STEPS = [0.5, 0.75, 1.0, 1.25, 1.5]
 TUNE_STEPS = [0.8, 0.9, 1.0, 1.1, 1.25]  # how far each number is nudged when searching for better rules
@@ -170,7 +176,12 @@ TICKERS
   One or more Yahoo symbols: EURUSD=X, SPY, AAPL
   Or a ready-made list: FOREX (7 major pairs), FOREX28 (majors and crosses), SP500 (about 500 stocks)
   Several tickers are tested one by one, each with the full starting money, or as one portfolio
-  that shares it.
+  that shares it. A portfolio splits its money in one of three ways:
+    smart    more to the tickers where the rule's past signals made a profit more often and
+             lost less (the Kelly formula, at half strength), less to positions that move
+             together, never more than the account holds
+    equal    the same slice for every ticker
+    spread   shared equally by the tickers that have a position open
 
 MODES
   Default    press Enter at the start: the pendulum study
@@ -619,11 +630,14 @@ def trade_plan(prices, start, end, buy_rule, sell_rule, short_rule="", cover_rul
     held, entry = 0, 0.0  # the position in place today and the price it was opened at
     waiting = 0  # after a stop or take profit: the side that may not be entered until its rule resets
     wants, reasons, exits = [], [], {}
+    closed = []  # (day, % made per unit held) of every position the rules closed, before costs
 
     for i in range(len(dates)):
         # ---- at the open: the position wanted last night is in place ----
         now = (want > 0) - (want < 0)
         if now != held:
+            if held:
+                closed.append((i, held * (opens[i] / entry - 1)))
             held, entry = now, opens[i]
 
         # ---- during the day: a stop or take profit may close it ----
@@ -632,6 +646,7 @@ def trade_plan(prices, start, end, buy_rule, sell_rule, short_rule="", cover_rul
             hit = _order_hit(held, entry, opens[i], highs[i], lows[i], stop, gain)
             if hit:
                 exits[i] = hit
+                closed.append((i, held * (hit[0] / entry - 1)))
                 exited = waiting = held
                 side = held = 0
 
@@ -658,14 +673,50 @@ def trade_plan(prices, start, end, buy_rule, sell_rule, short_rule="", cover_rul
 
     return {"dates": dates, "open": np.array(opens), "close": prices["Close"][window].to_numpy(dtype=float),
             "dividends": _dividends(prices)[window].to_numpy(dtype=float),
-            "wants": np.array(wants), "reasons": reasons, "exits": exits}
+            "wants": np.array(wants), "reasons": reasons, "exits": exits, "closed": closed}
+
+
+def _note_result(record, result):
+    # record: [signals closed, winners, sum of the wins, sum of the losses]
+    record[0] += 1
+    if result > 0:
+        record[1] += 1
+        record[2] += result
+    else:
+        record[3] -= result
+
+
+def expected_edge(own, everyone):
+    # How likely is the next signal on this ticker to pay, and how much should be bet on it?
+    # The only evidence is how the rule's earlier signals ended. A ticker's own record is short, so
+    # it is mixed with KELLY_PRIOR signals' worth of the record of all tickers together: a ticker
+    # with no history is treated as average, and one with a long history mostly speaks for itself.
+    # The Kelly formula then gives the share of the money that grows it fastest in the long run:
+    #     share = chance of a win / average loss - chance of a loss / average win
+    # It is negative when the wins do not pay for the losses. Returns (chance, win, loss, share),
+    # or None while too few signals have closed to say anything. own can be one record or, to do
+    # many tickers at once, four arrays
+    signals, winners = everyone[0], everyone[1]
+    if signals < KELLY_MIN_SIGNALS or winners in (0, signals) or everyone[3] == 0:
+        return None
+    usual_win, usual_loss = everyone[2] / winners, everyone[3] / (signals - winners)
+    prior_wins = KELLY_PRIOR * winners / signals
+    prior_losses = KELLY_PRIOR - prior_wins
+    wins, losses = own[1] + prior_wins, own[0] - own[1] + prior_losses
+    chance = wins / (wins + losses)
+    win = (own[2] + prior_wins * usual_win) / wins
+    loss = (own[3] + prior_losses * usual_loss) / losses
+    return chance, win, loss, chance / loss - (1 - chance) / win
 
 
 def simulate(plans, initial, cost_pct=0.1, rebalance_pct=10.0, short_fee_pct=0.0, carry_pct=0.0,
-             cash_rate_pct=0.0, max_weight_pct=None):
-    # Trades every plan out of one account. Each ticker may use an equal slice of the money, or,
-    # with max_weight_pct, the money is spread over the tickers that have a position open, up to
-    # that much each. One ticker gets all of it either way.
+             cash_rate_pct=0.0, allocation="equal", max_weight_pct=None):
+    # Trades every plan out of one account. allocation decides the share of the account each
+    # ticker may use (one ticker alone gets all of it):
+    #   "equal"   the same slice for every ticker, used or not
+    #   "spread"  shared equally by the tickers the rules want a position in, max_weight_pct at most
+    #   "smart"   more to the tickers where the rule's record says a profit is likelier and less
+    #             to positions that move together, see reallocate below
     names = list(plans)
     dates = plans[names[0]]["dates"]
     for name in names[1:]:
@@ -677,7 +728,7 @@ def simulate(plans, initial, cost_pct=0.1, rebalance_pct=10.0, short_fee_pct=0.0
     opens = np.full((len(dates), count), np.nan)
     closes = np.full((len(dates), count), np.nan)
     trading = np.zeros((len(dates), count), dtype=bool)
-    wants_at, exits_at, payouts_at = {}, {}, {}  # day -> what happens to which ticker
+    wants_at, exits_at, payouts_at, closed_at = {}, {}, {}, {}  # day -> what happens to which ticker
     for k, name in enumerate(names):
         plan = plans[name]
         rows = dates.get_indexer(plan["dates"])
@@ -689,6 +740,8 @@ def simulate(plans, initial, cost_pct=0.1, rebalance_pct=10.0, short_fee_pct=0.0
             exits_at.setdefault(rows[i], []).append((k, price, reason))
         for i in np.flatnonzero(plan["dividends"]):
             payouts_at.setdefault(rows[i], []).append((k, float(plan["dividends"][i])))
+        for i, result in plan["closed"]:
+            closed_at.setdefault(rows[i], []).append((k, result))
     if count > 1:
         closes = pd.DataFrame(closes).ffill().to_numpy()
         opens = np.where(trading, opens, np.vstack([closes[:1], closes[:-1]]))
@@ -700,8 +753,24 @@ def simulate(plans, initial, cost_pct=0.1, rebalance_pct=10.0, short_fee_pct=0.0
     cash_rate = (cash_rate_pct or 0.0) / 100 / 365  # earned on money that is not invested, per night
     financing = bool(fee or carry or cash_rate)
     band = rebalance_pct / 100
-    cap = max_weight_pct / 100 if max_weight_pct else None
-    slice_ = min(cap, 1.0) if cap else 1 / count  # share of the account one ticker may use
+    if count == 1:
+        allocation = "equal"
+    if allocation not in ("equal", "spread", "smart"):
+        raise ValueError(f"unknown way to split the money: '{allocation}'")
+    smart = allocation == "smart"
+    # the most one ticker may use. Left to itself a smart portfolio gives no ticker more than twice
+    # an equal slice, so that it stays spread out and holds cash when few tickers have a signal
+    cap = max_weight_pct / 100 if max_weight_pct else (min(1.0, 2 / count) if smart else 1.0)
+    share = [1 / count if allocation == "equal" else min(cap, 1 / count)] * count  # of the account, per ticker
+    records, everyone = np.zeros((count, 4)), [0, 0, 0.0, 0.0]  # how the rule's signals ended so far
+    share_sum, share_days, last_split = [0.0] * count, [0] * count, 0
+    together, measured = None, 0  # how alike the tickers' daily moves have been, and the day that was measured
+    # with hundreds of tickers a signal starts or ends somewhere every day, and working the whole
+    # split out daily is slow for little gain. A newcomer waits a few days on the share it had last
+    patience = 1 if count <= BIG_PORTFOLIO else 5
+    if smart:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            moves = np.nan_to_num(np.vstack([np.zeros((1, count)), closes[1:] / closes[:-1] - 1]))
 
     always_open, everything = bool(trading.all()), [True] * count
     days = dates.to_pydatetime()  # plain dates are much quicker to pick out one at a time
@@ -719,6 +788,39 @@ def simulate(plans, initial, cost_pct=0.1, rebalance_pct=10.0, short_fee_pct=0.0
         trades.append(_trade_record(names[k], trade[k], day, reason, "closed"))
         shares[k], trade[k] = 0.0, None
         held.discard(k)
+
+    def reallocate(d):
+        # The smart split, worked out after the close of day d from what was known by then:
+        # 1. each wanted ticker starts with half its Kelly share (see expected_edge), and nothing
+        #    if the rule's record on it does not point to a profit
+        # 2. positions that have moved together over the last weeks are one bet made twice, so
+        #    each is cut by how much of it the others repeat
+        # 3. if the shares add up to more than the account they are scaled down to fit, so
+        #    nothing is borrowed, and no ticker gets more than the cap
+        # Until enough signals have closed there is no record to go on and every ticker gets the same
+        nonlocal together, measured
+        tickers = sorted(wanted)
+        edge = expected_edge(records[tickers].T, everyone) if tickers else None
+        if edge is None:
+            return
+        size = np.maximum(KELLY_FRACTION * edge[3], 0.0)
+        if len(tickers) > 1 and d >= OVERLAP_DAYS // 3 and size.any():
+            if together is None or d - measured >= REALLOCATE_DAYS:
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    together = np.nan_to_num(np.corrcoef(moves[max(0, d - OVERLAP_DAYS + 1):d + 1], rowvar=False))
+                measured = d
+            side = np.sign([target[k] for k in tickers])  # a long and a short in two alike tickers offset each other
+            alike = (together[np.ix_(tickers, tickers)] * np.outer(side, side)).clip(min=0)
+            np.fill_diagonal(alike, 0)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                as_big = np.nan_to_num(np.minimum(size[None, :] / size[:, None], 1.0))  # a small twin repeats little
+            size = size / (1 + (alike * as_big).sum(axis=1))
+        if size.sum() > 1:
+            size = size / size.sum()
+        for k, part in zip(tickers, np.minimum(size, cap).tolist()):
+            share[k] = part
+            if part == 0 and shares[k] != 0:
+                why[k] = "no profit expected"
 
     for d in range(len(dates)):
         # ---- overnight: fees and interest on what was held since the last close ----
@@ -756,8 +858,8 @@ def simulate(plans, initial, cost_pct=0.1, rebalance_pct=10.0, short_fee_pct=0.0
             for k in held:
                 target[k], why[k] = 0.0, "account wiped out"
 
-        # close what is no longer wanted, or wanted the other way round
-        closing = [k for k in held if open_today[k] and target[k] * shares[k] <= 0]
+        # close what is no longer wanted, wanted the other way round, or given no money
+        closing = [k for k in held if open_today[k] and target[k] * share[k] * shares[k] <= 0]
         if closing:
             for k in sorted(closing):
                 close_position(k, price[k], days[d], why[k])
@@ -769,9 +871,9 @@ def simulate(plans, initial, cost_pct=0.1, rebalance_pct=10.0, short_fee_pct=0.0
         orders = []
         if equity > 0:
             for k in wanted:
-                if open_today[k]:
-                    change = target[k] * slice_ * equity - shares[k] * price[k]
-                    if shares[k] == 0 or abs(change) > band * slice_ * equity or (change > 0 and k in reinvest):
+                if open_today[k] and (share[k] or shares[k]):
+                    change = target[k] * share[k] * equity - shares[k] * price[k]
+                    if shares[k] == 0 or abs(change) > band * share[k] * equity or (change > 0 and k in reinvest):
                         orders.append((change, k))
         if len(orders) > 1:
             orders.sort()  # sells first, so their money can pay for the buys
@@ -809,6 +911,12 @@ def simulate(plans, initial, cost_pct=0.1, rebalance_pct=10.0, short_fee_pct=0.0
         gross.append(borrowed / value if value > 0 else 0.0)
         positions.append(len(held))
 
+        changed = False
+        if smart and d in closed_at:
+            for k, result in closed_at[d]:  # what the signal made after paying to get in and out
+                _note_result(records[k], result - 2 * cost)
+                _note_result(everyone, result - 2 * cost)
+            changed = True
         if d in wants_at and not wiped_out:
             for k, want, reason in wants_at[d]:
                 target[k] = want
@@ -818,14 +926,25 @@ def simulate(plans, initial, cost_pct=0.1, rebalance_pct=10.0, short_fee_pct=0.0
                     wanted.add(k)
                 else:
                     wanted.discard(k)
-            if cap:
-                slice_ = min(cap, 1 / max(len(wanted), 1))
+            changed = True
+        if allocation == "spread" and changed:
+            for k in wanted:
+                share[k] = min(cap, 1 / len(wanted))
+        elif smart and ((changed and d - last_split >= patience) or d - last_split >= REALLOCATE_DAYS):
+            reallocate(d)
+            last_split = d
+        if count > 1:
+            for k in wanted:
+                share_sum[k] += share[k]
+                share_days[k] += 1
 
     for k in sorted(held):
         trades.append(_trade_record(names[k], trade[k], days[-1], "still open", "open",
                                     extra=shares[k] * closes[-1, k]))
     return {"dates": dates, "values": values, "net": net, "gross": gross, "positions": positions,
-            "trades": trades, "interest": interest}
+            "trades": trades, "interest": interest, "allocation": allocation, "records": records,
+            "everyone": everyone, "share": share,
+            "share_avg": [total / n if n else 0.0 for total, n in zip(share_sum, share_days)]}
 
 
 def _trade_record(ticker, trade, exit_date, reason, status, extra=0.0):
@@ -900,21 +1019,40 @@ def portfolio_plans(data, start, end, settings):
     return plans, skipped
 
 
-def run_portfolio(data, start, end, buy_rule, sell_rule, initial, max_weight_pct=None, planned=None, **options):
-    # every ticker in data follows the same rules and they all trade out of one account.
-    # Buy & hold here means: split the money equally over the same tickers and never sell.
+def run_portfolio(data, start, end, buy_rule, sell_rule, initial, allocation="smart", max_weight_pct=None,
+                  planned=None, **options):
+    # every ticker in data follows the same rules and they all trade out of one account, which
+    # allocation splits between them (see simulate). Buy & hold here means: split the money equally
+    # over the same tickers and never sell.
     # planned is the result of portfolio_plans, to save working it out again for the same rules
     settings = {"buy_rule": buy_rule, "sell_rule": sell_rule, **options}
     plans, skipped = planned or portfolio_plans(data, start, end, settings)
     money = {k: v for k, v in settings.items() if k not in PLAN_KEYS}
-    sim = simulate(plans, initial, max_weight_pct=max_weight_pct, **money)
+    sim = simulate(plans, initial, allocation=allocation, max_weight_pct=max_weight_pct, **money)
     each = initial / len(plans)
     held = {ticker: hold_value(data[ticker], start, end, each, money.get("cost_pct", 0.1))
             .reindex(sim["dates"]).ffill().fillna(each) for ticker in plans}  # cash until its first day
     result = _result(sim, sum(held.values()), initial, money.get("cash_rate_pct", 0.0))
-    result["tickers"], result["skipped"] = list(plans), skipped
+    result["tickers"], result["skipped"], result["allocation"] = list(plans), skipped, sim["allocation"]
     result["per_ticker"] = ticker_breakdown(result["trades"], {t: v.iloc[-1] - each for t, v in held.items()})
+    result["shares"] = share_table(list(plans), sim)
     return result
+
+
+def share_table(tickers, sim):
+    # how the account was split, and for a smart portfolio what the split was based on at the end
+    rows = []
+    for k, ticker in enumerate(tickers):
+        row = {"Ticker": ticker, "Avg share %": round(sim["share_avg"][k] * 100, 1),
+               "Share now %": round(sim["share"][k] * 100, 1)}
+        if sim["allocation"] == "smart":
+            edge = expected_edge(sim["records"][k], sim["everyone"])
+            row["Signals"] = int(sim["records"][k][0])
+            if edge:
+                row.update({"Win chance %": round(edge[0] * 100, 1), "Avg win %": round(edge[1] * 100, 2),
+                            "Avg loss %": round(edge[2] * 100, 2), "Kelly share %": round(edge[3] * 100, 1)})
+        rows.append(row)
+    return pd.DataFrame(rows).sort_values("Avg share %", ascending=False).reset_index(drop=True)
 
 
 def ticker_breakdown(trades, hold_profit):
@@ -1303,20 +1441,29 @@ def analyse_ticker(prices, start, end, settings, split_date=None, advanced=True,
     return r
 
 
-def analyse_portfolio(data, start, end, settings, split_date=None, advanced=True, max_weight_pct=None,
-                      sp500_fund=None):
+def analyse_portfolio(data, start, end, settings, split_date=None, advanced=True, allocation="smart",
+                      max_weight_pct=None, sp500_fund=None):
     # the random benchmark, the sensitivity check and the number search look at one price series,
-    # so a portfolio is judged on costs and on the train/test split
+    # so a portfolio is judged on costs, on timing, on the train/test split, and on whether its
+    # way of splitting the money did better than simply giving every ticker the same
+    how = {"allocation": allocation, "max_weight_pct": max_weight_pct}
     planned = portfolio_plans(data, start, end, settings)
-    full = run_portfolio(data, start, end, **settings, max_weight_pct=max_weight_pct, planned=planned)
-    no_cost = run_portfolio(data, start, end, **{**settings, "cost_pct": 0.0, "short_fee_pct": 0.0},
-                            max_weight_pct=max_weight_pct, planned=planned)
-    late = run_portfolio(data, start, end, **{**settings, "delay_days": 1}, max_weight_pct=max_weight_pct)
+    full = run_portfolio(data, start, end, **settings, **how, planned=planned)
+    no_cost = run_portfolio(data, start, end, **{**settings, "cost_pct": 0.0, "short_fee_pct": 0.0}, **how,
+                            planned=planned)
+    late = run_portfolio(data, start, end, **{**settings, "delay_days": 1}, **how)
     train = test = None
     if advanced and split_date:
-        train = run_portfolio(data, start, split_date, **settings, max_weight_pct=max_weight_pct)
-        test = run_portfolio(data, split_date, end, **settings, max_weight_pct=max_weight_pct)
+        train = run_portfolio(data, start, split_date, **settings, **how)
+        test = run_portfolio(data, split_date, end, **settings, **how)
     r = _finish(full, no_cost, late, train, test, None, None, None, advanced, settings, sp500_fund)
+    r["equal"] = None
+    if full["allocation"] != "equal":
+        r["equal"] = run_portfolio(data, start, end, **settings, allocation="equal", planned=planned)
+        ours, theirs = full["metrics"], r["equal"]["metrics"]
+        r["notes"].append(f"Its way of splitting the money made {ours['total_return']:.1f}% (Sharpe "
+                          f"{ours['sharpe']:.2f}). Equal slices made {theirs['total_return']:.1f}% "
+                          f"(Sharpe {theirs['sharpe']:.2f})")
     r["data_notes"] = [f"{t}: {note}" for t in full["tickers"] for note in data_notes(data[t])
                        if note.startswith("Removed")]
     return r
@@ -1472,14 +1619,19 @@ def shorting_on(settings):
     return parse_rule(settings.get("short_rule", "")) is not None
 
 
-def print_settings(tickers, start, end, settings, split_date, advanced, portfolio=False, max_weight_pct=None):
+SPLITS = {"smart": "split by the app, more where a profit is likelier",
+          "equal": "an equal slice each", "spread": "spread over open positions"}
+
+
+def print_settings(tickers, start, end, settings, split_date, advanced, portfolio=False, allocation="smart",
+                   max_weight_pct=None):
     s = settings
     shown = ", ".join(tickers[:8]) + (f" and {len(tickers) - 8} more" if len(tickers) > 8 else "")
     print("\nSettings")
     print(f"  Mode:            {'advanced' if advanced else 'quick'}")
     print(f"  Tickers:         {shown}")
     if len(tickers) > 1:
-        split = f"spread over open positions, at most {max_weight_pct:g}% each" if max_weight_pct else "an equal slice each"
+        split = SPLITS[allocation] + (f", at most {max_weight_pct:g}% in one" if max_weight_pct and allocation != "equal" else "")
         print(f"  Money:           {'one portfolio, ' + split if portfolio else 'each ticker on its own'}")
     print(f"  Period:          {start} to {end}")
     if advanced:
@@ -1584,6 +1736,20 @@ def print_report(ticker, r):
             "strategy_%": "Strategy %", "buy_hold_%": "Buy & hold %", "difference_%": "Difference"})
         print("\nBy year")
         print(indent(yearly.to_string(), 2))
+
+
+def print_shares(r, top_n=8):
+    full = r["full"]
+    table = full["shares"]
+    if full["allocation"] == "smart":
+        print("\nHow the app split the money (from how the rule's earlier signals ended on each ticker)")
+        if "Kelly share %" not in table.columns:
+            print(f"  Fewer than {KELLY_MIN_SIGNALS} signals closed, so every ticker got the same")
+    else:
+        print("\nHow the money was split")
+    print(indent(table.head(top_n).to_string(index=False), 2))
+    if len(table) > top_n:
+        print(f"  ... and {len(table) - top_n} more")
 
 
 def print_per_ticker(r, top_n=5):
@@ -1900,12 +2066,12 @@ def _loading(done, total):
         print(f"  {done} of {total} loaded")
 
 
-def run_study(tickers, start, end, settings, split_date, advanced, portfolio=False, max_weight_pct=None,
-              compare_sp500=False):
+def run_study(tickers, start, end, settings, split_date, advanced, portfolio=False, allocation="smart",
+              max_weight_pct=None, compare_sp500=False):
     # several tickers are tested one by one, each with the full starting money, or as one
     # portfolio that shares it. More than MAX_DETAILED tickers one by one get a quick backtest each
     portfolio = portfolio and len(tickers) > 1
-    print_settings(tickers, start, end, settings, split_date, advanced, portfolio, max_weight_pct)
+    print_settings(tickers, start, end, settings, split_date, advanced, portfolio, allocation, max_weight_pct)
     print(f"\nLoading {', '.join(tickers) if len(tickers) <= 8 else str(len(tickers)) + ' tickers'}...")
     data, failed = load_many(tickers, start, end, _loading)
     for ticker, reason in failed:
@@ -1921,7 +2087,8 @@ def run_study(tickers, start, end, settings, split_date, advanced, portfolio=Fal
 
     if portfolio:
         try:
-            r = analyse_portfolio(data, start, end, settings, split_date, advanced, max_weight_pct, sp500_fund)
+            r = analyse_portfolio(data, start, end, settings, split_date, advanced, allocation, max_weight_pct,
+                                  sp500_fund)
         except Exception as e:
             print(f"The portfolio could not be tested: {e}")
             return
@@ -1929,6 +2096,7 @@ def run_study(tickers, start, end, settings, split_date, advanced, portfolio=Fal
         print_data_notes(r)
         if print_rule_check(name, r, settings):
             print_report(name, r)
+            print_shares(r)
             print_per_ticker(r)
         print_verdict(r)
         plot_portfolio(r, split_date)

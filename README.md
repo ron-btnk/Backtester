@@ -20,6 +20,7 @@ Version 2 makes the simulation closer to real trading and adds testing on many t
 | Interest | Borrow fee on shorts | Also carry on positions and interest on cash |
 | Fill timing | Not tested | Every backtest is rerun a day late |
 | Several tickers | One by one | One by one, or one shared portfolio |
+| Money in a portfolio | - | Split by the app from each ticker's record, the Kelly formula and how alike positions are |
 | Ready-made lists | None | Forex pairs, S&P 500 stocks |
 | Benchmark | Buy and hold | Also the S&P 500, on request |
 
@@ -77,7 +78,7 @@ Optional settings: position sizing by an indicator, volatility targeting, a reba
 | One ticker | Any Yahoo Finance symbol, e.g. `EURUSD=X`, `SPY`, `AAPL`. In advanced mode it gets every check |
 | A few tickers | Up to 5 are each tested like a single ticker, with a summary table |
 | A ready-made list | 7 major forex pairs, all 28 pairs of the 8 main currencies, or the S&P 500 stocks. Each ticker gets one backtest, and the result shows on how many of them the rule beat buy and hold. Any ticker can then be opened for the full checks |
-| A portfolio | The same tickers trading out of one account with one pot of starting money |
+| A portfolio | The same tickers trading out of one account with one pot of starting money, which the app splits between them |
 | Against the S&P 500 | A tick box adds what the same money would have made in an S&P 500 fund (SPY, dividends reinvested) to the numbers and the charts |
 
 Testing a rule on a whole list is a check in itself. A rule with a real edge should work on most tickers of the same kind, not only on the one it was designed on.
@@ -88,12 +89,46 @@ With several tickers there are two ways to run them.
 
 **Each on its own.** Every ticker gets the full starting money and its own result. The tickers do not affect each other.
 
-**One shared portfolio.** One account trades all of them with the same rules, so the starting money is shared. The portfolio is compared with splitting the money equally over the same tickers and never selling. There are two ways to share:
+**One shared portfolio.** One account trades all of them with the same rules, so the starting money is shared. This is a different test from the first: it asks what happens if you apply one rule to, say, five currency pairs with one pot of money. The portfolio is compared with putting the money equally into the same tickers and never selling.
 
+By default the app decides how much each ticker gets. Advanced mode also offers two plain splits:
+
+- *Decided by the app.* More to the tickers where a profit looks likelier, less to positions that repeat each other. See below.
 - *An equal slice per ticker.* With 10 tickers each may use 10% of the account. A ticker with no signal leaves its slice in cash, so the portfolio is often only partly invested.
-- *Spread over open positions.* The money is shared by the tickers that have a position open, up to a limit per ticker. With 2 signals on and a 20% limit, 40% is invested. With 10 signals on, each gets 10%.
+- *Spread over open positions.* The money is shared equally by the tickers that have a position open, up to a limit per ticker.
 
 Positions are resized when they drift further from their share than the rebalance band. Sells are done before buys, and a buy never spends more cash than the account holds.
+
+### How the app decides
+
+Each evening the app works out a share of the account for every ticker the rules want a position in, using only what was known by then.
+
+**1. How likely is a profit?** The only evidence is how the rule's earlier signals ended on that ticker: how often they won, and how big the wins and losses were, after costs. One ticker's record is short and mostly luck, so it is mixed with the record of all the tickers together. A ticker with no history is treated as average. A ticker needs 100 signals of its own before its record counts as much as everyone's.
+
+**2. How much to bet?** The Kelly formula gives the share of the money that grows it fastest in the long run:
+
+$$f = \frac{p}{L} - \frac{1 - p}{W}$$
+
+where p is the chance of a win, W the average win and L the average loss. A rule that wins 55% of the time with wins of 3% and losses of 2% gets f = 0.55/0.02 - 0.45/0.03 = 12.5, far more than the account. A rule that wins 40% of the time with the same sizes gets f = 0, and anything worse is negative. The app bets half of f, because p, W and L are estimates and betting too much costs more than betting too little. A ticker with a negative f gets no money. Its signals are still followed on paper, so its record keeps growing and it can earn its way back.
+
+**3. Is it the same bet twice?** Being long EUR/USD and long GBP/USD is close to one bet on the dollar. The app measures how alike the tickers' daily moves were over the last 60 days and cuts each position by how much of it the others repeat. A long and a short in two alike tickers offset each other and are not cut.
+
+**4. Is there enough money?** If the shares add up to more than the account they are scaled down to fit, so nothing is borrowed. No ticker gets more than twice an equal slice unless you set another limit, which keeps the portfolio spread out and leaves cash idle when few tickers have a signal.
+
+Until 20 signals have closed there is no record to go on, and every ticker gets the same.
+
+**The assumption behind it.** All of this assumes that a rule which has worked on a ticker will keep working there. Often it does not: a good record can be luck, and the split then moves money towards the tickers that are about to disappoint. That is why every portfolio result also shows what equal slices would have made with the same rules. On the data tried here the app's split did not win. Its Sharpe ratio was level with equal slices in one row and behind in the other five:
+
+| Rule and tickers, 2005-2026 | App's split | Equal slices |
+|---|---|---|
+| 200-day trend, 7 major forex pairs | -9.3%, -0.06, -21.6% | -8.1%, -0.03, -26.4% |
+| 200-day trend, 28 forex pairs | -9.3%, -0.21, -13.4% | -24.1%, -0.22, -33.5% |
+| Pendulum, 7 major forex pairs | -14.7%, -0.13, -30.7% | +3.6%, 0.06, -23.4% |
+| Pendulum, 28 forex pairs | -11.0%, -0.12, -23.5% | +6.8%, 0.09, -16.7% |
+| 200-day trend, long only, 10 large US stocks (AAPL, MSFT, XOM, JPM, KO, PG, WMT, CAT, PFE, T) | +918%, 0.96, -33.2% | +492%, 0.98, -19.9% |
+| 200-day trend, long only, S&P 500 stocks | +467%, 0.84, -27.3% | +410%, 0.94, -19.1% |
+
+Each cell is total return, Sharpe ratio and max drawdown. The app's split invested a different amount than equal slices did, which is where the higher stock returns come from, so compare the Sharpe ratios and drawdowns and not only the returns. It did what it was built to do on the 28 forex pairs with the trend rule, where it saw that the rule was losing and kept three quarters of the money out. On the pendulum it moved money towards pairs with a good record that then turned.
 
 ## How a backtest runs
 
@@ -168,8 +203,8 @@ Version 1 ended with "the next test is running both, unchanged, on other currenc
 | Made money | 3 of 28 pairs |
 | Beat buy and hold | 7 of 28 pairs |
 | Median return | -38.0%, against -7.2% for buy and hold |
-| As one portfolio of 28 | -24.1%, against -0.9% for holding all 28 |
-| As one portfolio of the 7 majors | -8.1%, against -4.6% for holding all 7 |
+| As one portfolio of 28, equal slices | -24.1%, against -0.9% for holding all 28 |
+| As one portfolio of the 7 majors, equal slices | -8.1%, against -4.6% for holding all 7 |
 
 EUR/USD was the best of the 28. The rule that looked like the strongest result of the study was most likely the one lucky pair, which is what the multiple testing section below warns about.
 
@@ -225,7 +260,7 @@ Verdict: mixed
 
 It lost less than buy and hold in 2005-2015 (-15.9% against -19.4%) and made more in 2016-2026 (+13.0% against +2.9%). That reads better than it is. Over 21 years it lost money, its Sharpe ratio is 0.01, and it beat only 54% of strategies that held for the same stretches at random times. Losing less than a falling market is not an edge. The worst trades were longs held for 4 to 8 months through long declines. In a slow decline the average falls with the price, so the price probably never looks far enough from equilibrium to trigger an exit. The number search found a 48-day window that made +27.7% over the full period, and on 2016-2026 alone it was about level with the original (Sharpe 0.23 against 0.20).
 
-On all 28 currency pairs the pendulum made money on 13 and lost on 15, with a median return of -1.4%. As one portfolio of 28 it made +6.8% in 21 years, a Sharpe ratio of 0.09.
+On all 28 currency pairs the pendulum made money on 13 and lost on 15, with a median return of -1.4%. As one portfolio of 28 with equal slices it made +6.8% in 21 years, a Sharpe ratio of 0.09.
 
 This is the second version of the model. The first used the full equation with sin and arccos, which treats θ as a real angle even though it is measured in standard deviations, and it assumed the market conserves energy. With the version 1 engine it lost 23.1% against 16.6% for buy and hold and beat 25% of random strategies. The model was rewritten because the physics was wrong, not to improve the result, so the second version also had a single test.
 
@@ -278,6 +313,7 @@ requirements.txt
 - The S&P 500 list is today's members, so results on it are too good. See the example above.
 - Costs are a flat percentage, not real bid/ask spreads, and there is no limit on how much can be traded at the quoted price.
 - The bad quote filter only runs on forex. A wrong price in a stock's history would be used as it is.
-- A portfolio runs the same rules on every ticker. It does not rank tickers against each other.
+- A portfolio runs the same rules on every ticker.
+- The app's split judges a ticker by the rule's past signals on it. With few signals that record is mostly luck, and it says nothing about a change in the market. The numbers it uses (half Kelly, 100 signals of pooling, 60 days for overlap) are judgement calls, not fitted values.
 
 Not financial advice. MIT license.

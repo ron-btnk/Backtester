@@ -21,7 +21,8 @@ Version 2 makes the simulation closer to real trading and adds testing on many t
 
 ### Added
 
-- **Portfolios.** Several tickers can trade out of one account that shares the starting money, with an equal slice per ticker or with the money spread over the open positions. The portfolio is compared with holding all its tickers equally.
+- **Portfolios.** Several tickers can trade out of one account that shares the starting money. The portfolio is compared with holding all its tickers equally.
+- **The app decides the split.** By default a portfolio gives more to the tickers where the rule's earlier signals paid off more often (the Kelly formula at half strength, with each ticker's record mixed with the record of all of them), less to positions that move together, and never more than the account holds. Equal slices and an equal spread over open positions are still there in advanced mode, and every result shows what equal slices would have made.
 - **Ready-made lists**: 7 major forex pairs, all 28 pairs of the 8 main currencies, and the S&P 500 stocks. With more than 5 tickers each gets one quick backtest, the result shows on how many the rule beat buy and hold, and any ticker can be opened for the full checks.
 - **Compare to the S&P 500.** A tick box adds an S&P 500 fund (SPY, dividends reinvested) to the numbers and charts.
 - Prices for many tickers load in batches with a progress bar.
@@ -30,7 +31,7 @@ Version 2 makes the simulation closer to real trading and adds testing on many t
 ### Changed for anyone using `backtester.py` directly
 
 - `run_backtest` is now two steps: `trade_plan` (what the rules want to hold) and `simulate` (the money). It takes the same arguments as before, plus `carry_pct`, `cash_rate_pct` and `delay_days`.
-- New: `run_portfolio`, `analyse_portfolio`, `scan_tickers`, `load_many`, `clean_prices`, `compare_sp500`, `universe`.
+- New: `run_portfolio`, `analyse_portfolio`, `scan_tickers`, `load_many`, `clean_prices`, `compare_sp500`, `universe`, `expected_edge`. `run_portfolio` and `simulate` take `allocation="smart"`, `"equal"` or `"spread"`.
 - `load_prices` returns unadjusted prices with a `Dividends` column.
 - `random_benchmark` reads the asset's returns from `result["buy_hold"]`, so dividends are included.
 
