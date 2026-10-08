@@ -147,6 +147,9 @@ def sidebar_inputs():
     start = left.date_input("Start date", pd.Timestamp(d["start"]).date(), min_value=date(1970, 1, 1),
                             max_value=date.today())
     end = right.date_input("End date", date.today(), min_value=date(1970, 1, 1))
+    # Streamlit's calendar only lists the years within 10 of the one it shows, so 2005 to 2026 takes three hops
+    sb.caption("To jump to another year, click the year in the box and type it. The calendar's own "
+               "year list only reaches 10 years each way.")
 
     settings = {
         "buy_rule": sb.text_input("Buy rule", d["buy_rule"]),
