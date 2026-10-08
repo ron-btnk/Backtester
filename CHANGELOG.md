@@ -26,6 +26,7 @@ Version 2 makes the simulation closer to real trading and adds testing on many t
 - **Ready-made lists**: 7 major forex pairs, all 28 pairs of the 8 main currencies, and the S&P 500 stocks. With more than 5 tickers each gets one quick backtest, the result shows on how many the rule beat buy and hold, and any ticker can be opened for the full checks.
 - **Compare to the S&P 500.** A tick box adds an S&P 500 fund (SPY, dividends reinvested) to the numbers and charts.
 - Prices for many tickers load in batches with a progress bar.
+- The app draws each chart once per result and reuses it, so the page no longer takes seconds to respond to every click.
 - `__version__`, shown in the app and the notebook.
 
 ### Changed for anyone using `backtester.py` directly

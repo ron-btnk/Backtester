@@ -2,6 +2,7 @@
 
 import time
 from contextlib import ExitStack, contextmanager
+from io import BytesIO
 from datetime import date
 
 import matplotlib.pyplot as plt
@@ -385,10 +386,20 @@ def show_verdict(r, settings):
         st.caption("Data: " + "; ".join(r["data_notes"][:4]) + more + ".")
 
 
-def show_figure(fig):
-    if fig is not None:
-        st.pyplot(fig)
-        plt.close(fig)
+def show_figure(study, name, draw):
+    # Streamlit reruns the whole page on every click, and drawing a chart takes seconds. Each
+    # chart of a study is therefore drawn once and kept as a picture
+    pictures = study.setdefault("pictures", {})
+    if name not in pictures:
+        fig = draw()
+        pictures[name] = None
+        if fig is not None:
+            picture = BytesIO()
+            fig.savefig(picture, format="png", dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            pictures[name] = picture.getvalue()
+    if pictures[name]:
+        st.image(pictures[name], width="stretch")
 
 
 def trades_tab(full):
@@ -462,7 +473,7 @@ def timing_and_costs(r):
                "appears, would not survive real trading.")
 
 
-def robustness_tab(ticker, r):
+def robustness_tab(ticker, r, study):
     timing_and_costs(r)
     if r["portfolio"]:
         st.info("The random benchmark, the sensitivity check and the search for better numbers look at "
@@ -488,7 +499,7 @@ def robustness_tab(ticker, r):
     else:
         st.write(f"**{sens['stable_pct']:.0f}%** of {sens['tested']} nearby settings beat buy & hold "
                  f"(Sharpe {sens['bh_sharpe']:.2f}). A real edge shouldn't depend on one exact number.")
-    show_figure(bt.plot_checks(ticker, r))
+    show_figure(study, f"checks {ticker}", lambda: bt.plot_checks(ticker, r))
     if sens is not None:
         rows = {}
         for row in sens["rows"]:
@@ -537,13 +548,14 @@ def show_ticker(ticker, r, study):
 
     charts, trades, train_test, robustness = st.tabs(["Charts", "Trades", "Train vs test", "Robustness checks"])
     with charts:
-        show_figure(bt.plot_results(ticker, r, study["split_date"], compact=not r["advanced"]))
+        show_figure(study, f"results {ticker}",
+                    lambda: bt.plot_results(ticker, r, study["split_date"], compact=not r["advanced"]))
     with trades:
         trades_tab(full)
     with train_test:
         train_test_tab(r, study["split_date"])
     with robustness:
-        robustness_tab(ticker, r)
+        robustness_tab(ticker, r, study)
 
 
 def split_tab(r):
@@ -594,7 +606,7 @@ def show_portfolio(study):
     charts, split, by_ticker, trades, train_test, robustness = st.tabs(
         ["Charts", "How the money was split", "By ticker", "Trades", "Train vs test", "Robustness checks"])
     with charts:
-        show_figure(bt.plot_portfolio(r, study["split_date"]))
+        show_figure(study, "portfolio", lambda: bt.plot_portfolio(r, study["split_date"]))
     with split:
         split_tab(r)
     with by_ticker:
@@ -606,7 +618,7 @@ def show_portfolio(study):
     with train_test:
         train_test_tab(r, study["split_date"])
     with robustness:
-        robustness_tab("Portfolio", r)
+        robustness_tab("Portfolio", r, study)
 
 
 def show_scan(study):
@@ -631,7 +643,7 @@ def show_scan(study):
 
     overview, everything, detail = st.tabs(["Overview", "All tickers", "One ticker in detail"])
     with overview:
-        show_figure(bt.plot_scan(table))
+        show_figure(study, "scan", lambda: bt.plot_scan(table))
     with everything:
         st.caption("Click a column to sort. Difference is the rule's return minus buy & hold's, in points.")
         st.dataframe(table.sort_values("Difference", ascending=False), hide_index=True, width="stretch",
