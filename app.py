@@ -150,7 +150,8 @@ def sidebar_inputs():
     tickers = ""
     if universe is None:
         tickers = sb.text_input("Tickers", ", ".join(d["tickers"]),
-                                help="Yahoo Finance symbols, separated by commas. E.g. EURUSD=X, SPY, AAPL")
+                                help="Yahoo Finance symbols, separated by commas. E.g. EURUSD=X, SPY, AAPL. "
+                                     "Enter two or more to compare them or to run them as one portfolio.")
         count = len(bt.as_tickers(tickers))
     else:
         count = len(bt.universe(universe))
@@ -158,15 +159,14 @@ def sidebar_inputs():
             sb.caption(f"{count} stocks. Loading and testing them takes a few minutes, and is quicker "
                        "when you run the app on your own computer.")
 
-    portfolio = False
-    if count > 1:
-        portfolio = sb.radio("Money", [SEPARATE, SHARED],
-                             help="On its own: every ticker gets the full starting money and its own "
-                                  "result. Shared: one account trades all of them, so the starting "
-                                  "money is split between them.") == SHARED
-        if not portfolio and count > bt.MAX_DETAILED:
-            sb.caption(f"With more than {bt.MAX_DETAILED} tickers each gets one quick backtest. "
-                       "Pick any of them afterwards for the full checks.")
+    # always on show, so it is clear that your own tickers can be run as a portfolio too
+    portfolio = sb.radio("Money", [SEPARATE, SHARED],
+                         help="On its own: every ticker gets the full starting money and its own "
+                              "result. Shared: one account trades all of them, so the starting "
+                              "money is split between them. A portfolio needs two or more tickers.") == SHARED
+    if not portfolio and count > bt.MAX_DETAILED:
+        sb.caption(f"With more than {bt.MAX_DETAILED} tickers each gets one quick backtest. "
+                   "Pick any of them afterwards for the full checks.")
 
     left, right = sb.columns(2)
     # without max_value Streamlit stops the picker 10 years after the default date
@@ -267,6 +267,9 @@ def check_inputs(raw):
     tickers = bt.universe(raw["universe"]) if raw["universe"] else bt.as_tickers(raw["tickers"])
     if not tickers:
         problems.append("**Tickers**: enter at least one ticker, e.g. `EURUSD=X` or `SPY`.")
+    if raw["portfolio"] and len(tickers) == 1:
+        problems.append(f"**Money**: a portfolio needs at least two tickers. Add more after `{tickers[0]}`, "
+                        f"separated by commas, or choose *{SEPARATE}*.")
     if start >= end:
         problems.append("**Dates**: the start date must be before the end date.")
 
@@ -299,7 +302,7 @@ def check_inputs(raw):
 
     iso = lambda day: day.isoformat() if day else None
     return {**raw, "tickers": tickers, "start": iso(start), "end": iso(end), "settings": settings,
-            "split_date": iso(split_date), "portfolio": raw["portfolio"] and len(tickers) > 1}, problems
+            "split_date": iso(split_date)}, problems
 
 
 def analyse(inputs, status=None):
