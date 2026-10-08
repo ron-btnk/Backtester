@@ -1,8 +1,9 @@
 """Backtesting engine: trading rules written as text, tested on daily prices.
 
 A run goes through the sections of this file in order:
+  Yahoo prices -> bad quotes removed, dividends kept separate    (Data)
   rule text -> syntax tree -> one True/False signal per day      (Rules and formulas)
-  signals -> day-by-day simulation with costs                    (Backtest engine)
+  signals -> what to hold each day -> money, costs, interest     (Backtest engine)
   equity curve -> return, Sharpe, drawdown, trade statistics     (Performance)
   three checks that the result is not luck or overfitting        (Random benchmark, Parameter
                                                                   sensitivity, train/test split)
@@ -10,8 +11,9 @@ A run goes through the sections of this file in order:
   a verdict that adds the evidence up                            (Analysis and verdict)
 
 Signals use the close and orders fill at the next day's open, so a rule never trades on a price
-it could not have seen. Backtester.ipynb holds the same code plus input() prompts, and app.py is
-the web front end.
+it could not have seen. Stops and take profits rest in the market and fill during the day.
+Several tickers can be tested one by one, or as one portfolio that shares the same money.
+Backtester.ipynb holds the same code plus input() prompts, and app.py is the web front end.
 """
 
 # ---- Setup ----
@@ -21,6 +23,7 @@ import math
 import re
 import textwrap
 from datetime import date
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -30,14 +33,35 @@ try:
 except ImportError:
     yf = None #if yfinance not installed -> program doesn't crash and only complains when you try download data
 
+__version__ = "2.0.0"
+
 TRADING_DAYS = 252 #rough number of days market is open per year
-WARMUP_DAYS = 500 #extra calendar days downloaded before start date -> more on this in load_prices
+WARMUP_DAYS = 500 #extra calendar days downloaded before start date -> more on this in load_many
+DOWNLOAD_CHUNK = 50 #tickers asked from Yahoo in one request
+BAD_TICK_SIZE = 8 #a forex close this many times the usual daily move, undone the next day, is a bad quote
+BAD_TICK_UNDONE = 0.25 #"undone" = the next close is back within this share of the jump
+MAX_DETAILED = 5 #with more tickers than this, each gets one quick backtest and the full checks run on request
+SP500_FUND = "SPY" #what "compare to the S&P 500" buys: a fund that holds the index and pays its dividends
 RANDOM_RUNS = 300 #random strategies benchmark creates to compare against strategy
 SENSITIVITY_STEPS = [0.5, 0.75, 1.0, 1.25, 1.5]
 TUNE_STEPS = [0.8, 0.9, 1.0, 1.1, 1.25]  # how far each number is nudged when searching for better rules
 TUNE_PASSES = 3
 MAX_MARKERS = 200
 RULE_SIDES = [("buy", "buy_rule"), ("sell", "sell_rule"), ("short", "short_rule"), ("cover", "cover_rule")]
+# the settings that decide what to hold. The rest decide what it costs and earns
+PLAN_KEYS = ("buy_rule", "sell_rule", "short_rule", "cover_rule", "size_rule", "position_pct",
+             "target_vol_pct", "stop_loss_pct", "take_profit_pct", "delay_days")
+
+# every pair of the eight most traded currencies, named the way the market quotes them
+_CURRENCIES = ["EUR", "GBP", "AUD", "NZD", "USD", "CAD", "CHF", "JPY"]
+FOREX_ALL = [f"{a}{b}=X" for i, a in enumerate(_CURRENCIES) for b in _CURRENCIES[i + 1:]]
+FOREX_MAJORS = [pair for pair in FOREX_ALL if "USD" in pair]
+UNIVERSES = {"FOREX": "Major forex pairs (7)", "FOREX28": "Major and cross forex pairs (28)",
+             "SP500": "S&P 500 stocks (about 500)"}
+try:
+    DATA_DIR = Path(__file__).parent / "data"
+except NameError:  # in the notebook
+    DATA_DIR = Path("data")
 
 # The pendulum written in the rule language (small swings, with friction):
 #   THETA = (PRICE - MA60) / STD60             distance from equilibrium, in standard deviations
@@ -100,6 +124,9 @@ CUSTOM_DEFAULTS = {
     "short_fee_pct": 0.0,
     "position_pct": 100,
     "rebalance_pct": 10,
+    "carry_pct": 0.0,
+    "cash_rate_pct": 0.0,
+    "max_weight_pct": 20,
 }
 
 HELP = """
@@ -127,12 +154,23 @@ SHORTING (optional)
   SHORT IF PRICE < MA200     bet on a fall
   COVER IF PRICE > MA200     close the short
   An opposite signal flips the position directly (long -> short or back).
-  Stop loss and take profit work in both directions. Sizing rules apply to longs only.
+  Sizing rules apply to longs only.
+
+STOP LOSS AND TAKE PROFIT (optional, % from the price the trade was opened at)
+  They work in both directions and fill during the day at their level, or at the open if the
+  price jumped past it overnight. After one of them closes a trade, the rule has to switch off
+  and on again before it enters in that direction again.
 
 SIZING (optional, how much to hold while the buy rule is active)
   SIZE BY ZSCORE20 FROM -1 TO -3     0% at -1, 100% at -3, in between scales linearly
   SIZE BY RSI14 FROM 40 TO 20        more RSI weakness, bigger position
   Target volatility, e.g. 15         hold less when the asset is jumpy
+
+TICKERS
+  One or more Yahoo symbols: EURUSD=X, SPY, AAPL
+  Or a ready-made list: FOREX (7 major pairs), FOREX28 (majors and crosses), SP500 (about 500 stocks)
+  Several tickers are tested one by one, each with the full starting money, or as one portfolio
+  that shares it.
 
 MODES
   Default    press Enter at the start: the pendulum study
@@ -140,6 +178,7 @@ MODES
              Shows your rule vs buy & hold, when you were in and out, what went wrong.
   Advanced   asks for every setting and adds a train/test split, 300 random strategies,
              parameter sensitivity and a search for better numbers in your rules.
+             With more than 5 tickers, each gets one quick backtest instead.
 """
 
 QUICK_DEFAULTS = {
@@ -151,21 +190,131 @@ QUICK_DEFAULTS = {
     "stop_loss_pct": None,
     "take_profit_pct": None,
     "short_fee_pct": 0.0,
+    "carry_pct": 0.0,
+    "cash_rate_pct": 0.0,
 }
 
 
 # ---- Data ----
 
-def load_prices(ticker, start, end):
+def is_forex(ticker):
+    return ticker.upper().endswith("=X")
+
+
+def universe(name):
+    key = name.strip().upper()
+    if key == "FOREX":
+        return list(FOREX_MAJORS)
+    if key == "FOREX28":
+        return list(FOREX_ALL)
+    if key == "SP500":
+        # today's members, so the companies that dropped out of the index over the years are missing
+        return pd.read_csv(DATA_DIR / "sp500.csv")["ticker"].tolist()
+    raise ValueError(f"unknown list '{name}'")
+
+
+def as_tickers(text):
+    # "eurusd=x, spy" -> ["EURUSD=X", "SPY"]. The name of a ready-made list stands for its tickers
+    tickers = []
+    for part in text.split(","):
+        part = part.strip().upper()
+        if part:
+            tickers += universe(part) if part in UNIVERSES else [part]
+    return list(dict.fromkeys(tickers))
+
+
+def _bad_ticks(close):
+    # a quote that jumps far outside the usual daily move and is back the next day never traded.
+    # "Usual" is measured on the days around it, so the real jumps of a crisis are left alone
+    c = close.to_numpy(dtype=float)
+    if len(c) < 3:
+        return close.index[:0]
+    moves = np.abs(c[1:] / c[:-1] - 1)  # moves[i] is the move into bar i + 1
+    bad = []
+    for t in range(1, len(c) - 1):
+        jump, after = c[t] / c[t - 1] - 1, c[t + 1] / c[t - 1] - 1
+        if abs(jump) < 0.01 or abs(after) > BAD_TICK_UNDONE * abs(jump):
+            continue
+        nearby = np.concatenate([moves[max(0, t - 11):t - 1], moves[t + 1:t + 11]])  # without the jump and its undoing
+        if len(nearby) >= 5 and abs(jump) > BAD_TICK_SIZE * np.median(nearby) > 0:
+            bad.append(t)
+    return close.index[bad]
+
+
+def clean_prices(df, ticker=""):
+    # Yahoo's columns -> Open, High, Low, Close, Dividends, with the faults that would move a
+    # backtest repaired. What was changed is listed in the result's .attrs["notes"]
+    out = df[["Open", "High", "Low", "Close"]].astype(float)
+    out["Dividends"] = 0.0
+    for name in ("Dividends", "Capital Gains"):  # funds pay out capital gains the same way
+        if name in df.columns:
+            out["Dividends"] += df[name].fillna(0.0).astype(float)
+    out = out.dropna()
+    out = out[(out[["Open", "High", "Low", "Close"]] > 0).all(axis=1)]
+    if out.empty:
+        raise ValueError("no data found")
+    notes = []
+    if is_forex(ticker):
+        # forex quotes come from dealers, not an exchange, and Yahoo's history has two faults.
+        # Some closes are plainly wrong (EUR/USD at 1.49 between two days at 1.28), and since
+        # about 2011 the open, high and low belong to the day after the close they are listed
+        # with. Only the closes line up over the whole history, so each bar is rebuilt from them:
+        # a currency trades around the clock, so the last close is the price you can trade at next
+        bad = _bad_ticks(out["Close"])
+        if len(bad):
+            out = out.drop(bad)
+            shown = ", ".join(str(day.date()) for day in bad[:5]) + (" ..." if len(bad) > 5 else "")
+            notes.append(f"Removed {len(bad)} bad quote{'s' if len(bad) > 1 else ''} ({shown})")
+        out["Open"] = out["Close"].shift(1).fillna(out["Open"])
+        out["High"] = out[["Open", "Close"]].max(axis=1)
+        out["Low"] = out[["Open", "Close"]].min(axis=1)
+        notes.append("Forex: each day opens at the previous close, and stops are checked on closes")
+    else:
+        out["High"] = out[["Open", "High", "Close"]].max(axis=1)
+        out["Low"] = out[["Open", "Low", "Close"]].min(axis=1)
+    out.attrs["notes"] = notes
+    return out
+
+
+def load_many(tickers, start, end, progress=None):
+    # returns ({ticker: prices}, [(ticker, why it was skipped)]). Prices are not adjusted for
+    # dividends: they are what was really quoted, and dividends are paid into the account instead
     if yf is None:
         raise ImportError("yfinance is not installed. Run: pip install yfinance")
+    tickers = list(tickers)
     buffer_start = (pd.Timestamp(start) - pd.Timedelta(days=WARMUP_DAYS)).strftime("%Y-%m-%d") #start date 500 days earlier than yours -> enough history for indicators such as MA200
-    df = yf.download(ticker, start=buffer_start, end=end, auto_adjust=True, progress=False)
-    if df is None or df.empty:
+    data, failed = {}, []
+
+    def download(chunk):
+        raw = yf.download(chunk, start=buffer_start, end=end, auto_adjust=False, actions=True,
+                          progress=False, group_by="ticker", threads=True)
+        missing = []
+        for ticker in chunk:
+            try:
+                data[ticker] = clean_prices(raw[ticker], ticker)
+            except (KeyError, ValueError, TypeError):
+                missing.append(ticker)
+        return missing
+
+    for i in range(0, len(tickers), DOWNLOAD_CHUNK):
+        missing = download(tickers[i:i + DOWNLOAD_CHUNK])
+        if missing:
+            missing = download(missing)  # in a big batch Yahoo sometimes drops a ticker that does exist
+        failed += [(ticker, "no data found") for ticker in missing]
+        if progress:
+            progress(min(i + DOWNLOAD_CHUNK, len(tickers)), len(tickers))
+    return {ticker: data[ticker] for ticker in tickers if ticker in data}, failed
+
+
+def load_prices(ticker, start, end):
+    data, failed = load_many([ticker], start, end)
+    if failed:
         raise ValueError(f"no data found for {ticker}")
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df[["Open", "High", "Low", "Close"]].dropna()
+    return data[ticker]
+
+
+def data_notes(prices):
+    return list(prices.attrs.get("notes", []))
 
 
 # ---- Indicators ----
@@ -388,14 +537,301 @@ def validate_size(text):
 
 
 # ---- Backtest engine ----
+#
+# A backtest has two steps. trade_plan turns one ticker's rules into what to hold after each close,
+# without any money involved. simulate then trades those plans with real money, costs and interest.
+# Because the plan does not depend on the money, the same code runs one ticker or a whole portfolio.
 
-def _sign(x):
-    return int(x > 0) - int(x < 0)
+def _dividends(prices):
+    if "Dividends" in prices.columns:
+        return prices["Dividends"]
+    return pd.Series(0.0, index=prices.index)
 
 
-def _trade_record(trade, exit_date, reason, status, extra=0.0):
+def _in_window(prices, start, end):
+    return (prices.index >= pd.Timestamp(start)) & (prices.index < pd.Timestamp(end))
+
+
+def _order_hit(held, entry, price_open, high, low, stop, gain):
+    # a stop loss and a take profit rest in the market as orders. Each fills at its own level, or at
+    # the open if the price jumped past it overnight. A daily bar does not say which came first
+    # when both levels are inside its range, so the stop is assumed to: the worse case
+    if stop is not None:
+        stop_at = entry * (1 - held * stop)
+        if held * (price_open - stop_at) <= 0:
+            return price_open, "stop loss"
+    if gain is not None:
+        gain_at = entry * (1 + held * gain)
+        if held * (price_open - gain_at) >= 0:
+            return price_open, "take profit"
+    worst, best = (low, high) if held > 0 else (high, low)
+    if stop is not None and held * (worst - stop_at) <= 0:
+        return stop_at, "stop loss"
+    if gain is not None and held * (best - gain_at) >= 0:
+        return gain_at, "take profit"
+    return None
+
+
+def trade_plan(prices, start, end, buy_rule, sell_rule, short_rule="", cover_rule="", size_rule="",
+               position_pct=100.0, target_vol_pct=None, stop_loss_pct=None, take_profit_pct=None,
+               delay_days=0):
+    # Signals are worked out on the whole history, warm-up included, then cut to start..end.
+    # Each day has three steps: at the open, the position wanted the evening before is in place;
+    # during the day a stop or take profit may close it; at the close, the signals are read and
+    # set what to hold tomorrow. delay_days makes every signal arrive that many days late, to
+    # see how much a result depends on being filled straight away.
+    close_all = prices["Close"]
+    cache = {}  # the four rules usually share indicators and formulas, so work each out once
+    buy_all = build_signal(buy_rule, close_all, cache)
+    sell_all = build_signal(sell_rule, close_all, cache)
+    short_all = build_signal(short_rule, close_all, cache)
+    cover_all = build_signal(cover_rule, close_all, cache)
+    strength_all = size_strength(size_rule, close_all)
+    if target_vol_pct:
+        vol = get_indicator("VOL20", close_all)
+        vol_scale_all = (target_vol_pct / vol).clip(upper=1).fillna(0)
+    else:
+        vol_scale_all = pd.Series(1.0, index=close_all.index)
+    if delay_days:
+        buy_all, sell_all, short_all, cover_all = (signal.shift(delay_days, fill_value=False)
+                                                   for signal in (buy_all, sell_all, short_all, cover_all))
+        strength_all, vol_scale_all = strength_all.shift(delay_days).fillna(0), vol_scale_all.shift(delay_days).fillna(0)
+
+    window = _in_window(prices, start, end)
+    dates = prices.index[window]
+    if len(dates) < 30:
+        raise ValueError(f"only {len(dates)} trading days between {start} and {end}")
+    opens = prices["Open"][window].tolist()
+    highs = prices["High"][window].tolist()
+    lows = prices["Low"][window].tolist()
+    buy_sig = buy_all[window].tolist()
+    sell_sig = sell_all[window].tolist()
+    short_sig = short_all[window].tolist()
+    cover_sig = cover_all[window].tolist()
+    base = min(position_pct, 100) / 100
+    long_size = (base * strength_all * vol_scale_all)[window].tolist()
+    short_size = (base * vol_scale_all)[window].tolist()
+    stop = stop_loss_pct / 100 if stop_loss_pct else None
+    gain = take_profit_pct / 100 if take_profit_pct else None
+    orders = stop is not None or gain is not None
+
+    side, want = 0, 0.0  # side: 1 long, -1 short, 0 out. want: share of the money to hold, short if negative
+    held, entry = 0, 0.0  # the position in place today and the price it was opened at
+    waiting = 0  # after a stop or take profit: the side that may not be entered until its rule resets
+    wants, reasons, exits = [], [], {}
+
+    for i in range(len(dates)):
+        # ---- at the open: the position wanted last night is in place ----
+        now = (want > 0) - (want < 0)
+        if now != held:
+            held, entry = now, opens[i]
+
+        # ---- during the day: a stop or take profit may close it ----
+        exited, reason = 0, ""
+        if orders and held != 0:
+            hit = _order_hit(held, entry, opens[i], highs[i], lows[i], stop, gain)
+            if hit:
+                exits[i] = hit
+                exited = waiting = held
+                side = held = 0
+
+        # ---- at the close: signals for tomorrow ----
+        if side == 1 and (sell_sig[i] or short_sig[i]):
+            reason = "sell rule" if sell_sig[i] else "flipped to short"
+        elif side == -1 and (cover_sig[i] or buy_sig[i]):
+            reason = "cover rule" if cover_sig[i] else "flipped to long"
+        if reason:
+            exited, side = side, 0
+        if waiting and not (buy_sig[i] if waiting == 1 else short_sig[i]):
+            waiting = 0
+        if side == 0:
+            if buy_sig[i] and exited != 1 and waiting != 1:
+                side = 1
+            elif short_sig[i] and exited != -1 and waiting != -1:
+                side = -1
+
+        want = long_size[i] if side == 1 else -short_size[i] if side == -1 else 0.0
+        if side != 0 and want == 0 and not exited:
+            reason = "sized down to 0%"
+        wants.append(want)
+        reasons.append(reason)
+
+    return {"dates": dates, "open": np.array(opens), "close": prices["Close"][window].to_numpy(dtype=float),
+            "dividends": _dividends(prices)[window].to_numpy(dtype=float),
+            "wants": np.array(wants), "reasons": reasons, "exits": exits}
+
+
+def simulate(plans, initial, cost_pct=0.1, rebalance_pct=10.0, short_fee_pct=0.0, carry_pct=0.0,
+             cash_rate_pct=0.0, max_weight_pct=None):
+    # Trades every plan out of one account. Each ticker may use an equal slice of the money, or,
+    # with max_weight_pct, the money is spread over the tickers that have a position open, up to
+    # that much each. One ticker gets all of it either way.
+    names = list(plans)
+    dates = plans[names[0]]["dates"]
+    for name in names[1:]:
+        dates = dates.union(plans[name]["dates"])
+    count = len(names)
+
+    # one row per day and one column per ticker. Tickers trade on different days (holidays, or a
+    # stock listed later), so on a day without a bar a ticker keeps its last close and cannot trade
+    opens = np.full((len(dates), count), np.nan)
+    closes = np.full((len(dates), count), np.nan)
+    trading = np.zeros((len(dates), count), dtype=bool)
+    wants_at, exits_at, payouts_at = {}, {}, {}  # day -> what happens to which ticker
+    for k, name in enumerate(names):
+        plan = plans[name]
+        rows = dates.get_indexer(plan["dates"])
+        opens[rows, k], closes[rows, k], trading[rows, k] = plan["open"], plan["close"], True
+        wants = plan["wants"]
+        for i in np.flatnonzero(np.diff(wants, prepend=0.0)):
+            wants_at.setdefault(rows[i], []).append((k, float(wants[i]), plan["reasons"][i]))
+        for i, (price, reason) in plan["exits"].items():
+            exits_at.setdefault(rows[i], []).append((k, price, reason))
+        for i in np.flatnonzero(plan["dividends"]):
+            payouts_at.setdefault(rows[i], []).append((k, float(plan["dividends"][i])))
+    if count > 1:
+        closes = pd.DataFrame(closes).ffill().to_numpy()
+        opens = np.where(trading, opens, np.vstack([closes[:1], closes[:-1]]))
+    nights = np.diff((dates - dates[0]).days, prepend=-1)  # 1 between weekdays, 3 over a weekend
+
+    cost = cost_pct / 100
+    fee = (short_fee_pct or 0.0) / 100 / 365  # paid on short positions, per night
+    carry = (carry_pct or 0.0) / 100 / 365  # earned on long positions and paid on short ones, per night
+    cash_rate = (cash_rate_pct or 0.0) / 100 / 365  # earned on money that is not invested, per night
+    financing = bool(fee or carry or cash_rate)
+    band = rebalance_pct / 100
+    cap = max_weight_pct / 100 if max_weight_pct else None
+    slice_ = min(cap, 1.0) if cap else 1 / count  # share of the account one ticker may use
+
+    always_open, everything = bool(trading.all()), [True] * count
+    days = dates.to_pydatetime()  # plain dates are much quicker to pick out one at a time
+    cash, interest, wiped_out = float(initial), 0.0, False
+    shares, target, why, trade = [0.0] * count, [0.0] * count, [""] * count, [None] * count  # shares < 0 means short
+    held, wanted = set(), set()  # tickers with a position, tickers the rules want a position in
+    trades, values, net, gross, positions = [], [], [], [], []
+
+    def close_position(k, price, day, reason):
+        nonlocal cash
+        value = shares[k] * price
+        cash += value - abs(value) * cost
+        trade[k]["flow"] += value - abs(value) * cost
+        trade[k]["orders"] += 1
+        trades.append(_trade_record(names[k], trade[k], day, reason, "closed"))
+        shares[k], trade[k] = 0.0, None
+        held.discard(k)
+
+    for d in range(len(dates)):
+        # ---- overnight: fees and interest on what was held since the last close ----
+        if financing and d:
+            invested = borrowed = 0.0
+            for k in held:
+                value = shares[k] * price[k]  # at the last close
+                paid = value * carry * nights[d] - (-value * fee * nights[d] if value < 0 else 0.0)
+                cash += paid
+                trade[k]["flow"] += paid
+                invested += value
+                borrowed += abs(value)
+            idle = cash + invested - borrowed  # money in the account that no position is using
+            if idle > 0:
+                cash += idle * cash_rate * nights[d]
+                interest += idle * cash_rate * nights[d]
+
+        # ---- at the open: dividends arrive, then trade towards yesterday's targets ----
+        price = opens[d].tolist()
+        open_today = everything if always_open else trading[d].tolist()
+        reinvest = ()
+        if d in payouts_at:
+            reinvest = set()
+            for k, per_share in payouts_at[d]:
+                if shares[k] != 0:  # held overnight: a long is paid the dividend, a short owes it
+                    cash += shares[k] * per_share
+                    trade[k]["flow"] += shares[k] * per_share
+                    reinvest.add(k)
+        equity = cash
+        for k in held:
+            equity += shares[k] * price[k]
+        if equity <= 0 and not wiped_out:
+            wiped_out = True
+            wanted.clear()
+            for k in held:
+                target[k], why[k] = 0.0, "account wiped out"
+
+        # close what is no longer wanted, or wanted the other way round
+        closing = [k for k in held if open_today[k] and target[k] * shares[k] <= 0]
+        if closing:
+            for k in sorted(closing):
+                close_position(k, price[k], days[d], why[k])
+            equity = cash
+            for k in held:
+                equity += shares[k] * price[k]
+
+        # open what is newly wanted, and resize what has drifted outside the rebalance band
+        orders = []
+        if equity > 0:
+            for k in wanted:
+                if open_today[k]:
+                    change = target[k] * slice_ * equity - shares[k] * price[k]
+                    if shares[k] == 0 or abs(change) > band * slice_ * equity or (change > 0 and k in reinvest):
+                        orders.append((change, k))
+        if len(orders) > 1:
+            orders.sort()  # sells first, so their money can pay for the buys
+        for change, k in orders:
+            if change > 0:
+                change = min(change, max(cash, 0.0)) / (1 + cost)  # leave room for the cost so cash doesn't go negative
+            if change == 0:
+                continue
+            if shares[k] == 0:
+                trade[k] = {"side": "long" if target[k] > 0 else "short", "entry_date": days[d],
+                            "notional": 0.0, "flow": 0.0, "orders": 0}
+                held.add(k)
+            if change * target[k] > 0:
+                trade[k]["notional"] += abs(change)
+            cash -= change + abs(change) * cost
+            trade[k]["flow"] -= change + abs(change) * cost
+            trade[k]["orders"] += 1
+            shares[k] += change / price[k]
+
+        # ---- during the day: stops and take profits ----
+        if d in exits_at:
+            for k, level, reason in exits_at[d]:
+                if shares[k] != 0:
+                    close_position(k, level, days[d], reason)
+
+        # ---- at the close: value the account, then read the signals for tomorrow ----
+        price = closes[d].tolist()
+        invested = borrowed = 0.0
+        for k in held:
+            invested += shares[k] * price[k]
+            borrowed += abs(shares[k] * price[k])
+        value = cash + invested
+        values.append(value)
+        net.append(invested / value if value > 0 else 0.0)
+        gross.append(borrowed / value if value > 0 else 0.0)
+        positions.append(len(held))
+
+        if d in wants_at and not wiped_out:
+            for k, want, reason in wants_at[d]:
+                target[k] = want
+                if reason:
+                    why[k] = reason
+                if want != 0:
+                    wanted.add(k)
+                else:
+                    wanted.discard(k)
+            if cap:
+                slice_ = min(cap, 1 / max(len(wanted), 1))
+
+    for k in sorted(held):
+        trades.append(_trade_record(names[k], trade[k], days[-1], "still open", "open",
+                                    extra=shares[k] * closes[-1, k]))
+    return {"dates": dates, "values": values, "net": net, "gross": gross, "positions": positions,
+            "trades": trades, "interest": interest}
+
+
+def _trade_record(ticker, trade, exit_date, reason, status, extra=0.0):
     profit = trade["flow"] + extra
     return {
+        "ticker": ticker,
         "side": trade["side"],
         "entry_date": trade["entry_date"].date(),
         "exit_date": exit_date.date(),
@@ -409,169 +845,120 @@ def _trade_record(trade, exit_date, reason, status, extra=0.0):
     }
 
 
-def run_backtest(prices, start, end, buy_rule, sell_rule, initial, cost_pct=0.1, position_pct=100.0,
-                 stop_loss_pct=None, take_profit_pct=None, size_rule="", target_vol_pct=None,
-                 rebalance_pct=10.0, short_rule="", cover_rule="", short_fee_pct=0.0):
-    # Signals are worked out on the whole history, warm-up included, then cut to start..end.
-    # Each day has two steps: at the open, trade towards the target set the evening before;
-    # at the close, read the signals and set the target for tomorrow.
-    close_all = prices["Close"]
-    cache = {}  # the four rules usually share indicators and formulas, so work each out once
-    buy_all = build_signal(buy_rule, close_all, cache)
-    sell_all = build_signal(sell_rule, close_all, cache)
-    short_all = build_signal(short_rule, close_all, cache)
-    cover_all = build_signal(cover_rule, close_all, cache)
-    strength_all = size_strength(size_rule, close_all)
-    if target_vol_pct:
-        vol = get_indicator("VOL20", close_all)
-        vol_scale_all = (target_vol_pct / vol).clip(upper=1).fillna(0)
-    else:
-        vol_scale_all = pd.Series(1.0, index=close_all.index)
-
-    window = (prices.index >= pd.Timestamp(start)) & (prices.index < pd.Timestamp(end))
-    dates = prices.index[window]
-    if len(dates) < 30:
-        raise ValueError(f"only {len(dates)} trading days between {start} and {end}")
+def hold_value(prices, start, end, initial, cost_pct=0.0):
+    # buy at the first open and never sell. Dividends buy more shares at the open of the day they are paid
+    window = _in_window(prices, start, end)
+    if not window.any():
+        raise ValueError(f"no prices between {start} and {end}")
     opens = prices["Open"][window].to_numpy(dtype=float)
-    close = close_all[window].to_numpy(dtype=float)
-    buy_sig = buy_all[window].to_numpy()
-    sell_sig = sell_all[window].to_numpy()
-    short_sig = short_all[window].to_numpy()
-    cover_sig = cover_all[window].to_numpy()
-    strength = strength_all[window].to_numpy(dtype=float)
-    vol_scale = vol_scale_all[window].to_numpy(dtype=float)
+    shares = initial * (1 - cost_pct / 100) / opens[0] * np.cumprod(1 + _dividends(prices)[window].to_numpy() / opens)
+    return shares * prices["Close"][window]
 
-    cost = cost_pct / 100
-    fee = (short_fee_pct or 0.0) / 100 / TRADING_DAYS  # borrow fee per day on the short position
-    base = min(position_pct, 100) / 100
-    threshold = rebalance_pct / 100
-    stop = stop_loss_pct / 100 if stop_loss_pct else None
-    gain_target = take_profit_pct / 100 if take_profit_pct else None
 
-    cash, shares, avg_price = float(initial), 0.0, 0.0  # shares < 0 means short
-    side, target, exit_reason = 0, 0.0, ""  # side: 1 long, -1 short, 0 out
-    trade, trades, values, weights = None, [], [], []
-
-    for i, day in enumerate(dates):
-        # ---- at the open: trade towards yesterday's target ----
-        price_open = opens[i]
-        equity = cash + shares * price_open
-        if equity <= 0:
-            side, target, exit_reason = 0, 0.0, "account wiped out"
-        current = shares * price_open / equity if equity > 0 else 0.0
-
-        if shares != 0 and (target == 0 or _sign(target) != _sign(shares)):
-            value = shares * price_open
-            cash += value - abs(value) * cost
-            trade["flow"] += value - abs(value) * cost
-            trade["orders"] += 1
-            trades.append(_trade_record(trade, day, exit_reason, "closed"))
-            shares, trade, current = 0.0, None, 0.0
-            equity = cash
-
-        if target != 0 and (shares == 0 or abs(target - current) > threshold):
-            change = target * equity - shares * price_open
-            if change > 0:
-                change /= 1 + cost  # leave room for the cost so cash doesn't go negative
-            delta = change / price_open
-            if shares == 0:
-                trade = {"side": "long" if target > 0 else "short", "entry_date": day,
-                         "notional": 0.0, "flow": 0.0, "orders": 0}
-                avg_price = price_open
-            elif _sign(delta) == _sign(shares):
-                avg_price = (avg_price * abs(shares) + price_open * abs(delta)) / (abs(shares) + abs(delta))
-            if _sign(change) == _sign(target):
-                trade["notional"] += abs(change)
-            cash -= change + abs(change) * cost
-            trade["flow"] -= change + abs(change) * cost
-            trade["orders"] += 1
-            shares += delta
-
-        # ---- at the close: fees, then signals for tomorrow ----
-        price = close[i]
-        if shares < 0 and fee:
-            charge = -shares * price * fee
-            cash -= charge
-            trade["flow"] -= charge
-
-        exited = 0
-        if side != 0:
-            holding = shares != 0 and _sign(shares) == side
-            move = side * (price / avg_price - 1) if holding else 0.0
-            reason = None
-            if holding and stop is not None and move <= -stop:
-                reason = "stop loss"
-            elif holding and gain_target is not None and move >= gain_target:
-                reason = "take profit"
-            elif side == 1 and sell_sig[i]:
-                reason = "sell rule"
-            elif side == -1 and cover_sig[i]:
-                reason = "cover rule"
-            elif side == 1 and short_sig[i]:
-                reason = "flipped to short"
-            elif side == -1 and buy_sig[i]:
-                reason = "flipped to long"
-            if reason:
-                exited, side, exit_reason = side, 0, reason
-        if side == 0:
-            if buy_sig[i] and exited != 1:
-                side = 1
-            elif short_sig[i] and exited != -1:
-                side = -1
-
-        if side == 1:
-            target = base * strength[i] * vol_scale[i]
-        elif side == -1:
-            target = -base * vol_scale[i]
-        else:
-            target = 0.0
-        if side != 0 and target == 0 and not exited:
-            exit_reason = "sized down to 0%"
-
-        value = cash + shares * price
-        values.append(value)
-        weights.append(shares * price / value if value > 0 else 0.0)
-
-    if shares != 0:
-        trades.append(_trade_record(trade, dates[-1], "still open", "open", extra=shares * close[-1]))
-
-    close_series = pd.Series(close, index=dates)
-    strategy = pd.Series(values, index=dates)
-    buy_hold = initial * (1 - cost) / opens[0] * close_series
-    trades_df = pd.DataFrame(trades)
-    weight_series = pd.Series(weights, index=dates)
+def _result(sim, buy_hold, initial, cash_rate_pct):
+    dates = sim["dates"]
+    strategy = pd.Series(np.array(sim["values"]), index=dates)
+    weights, gross = pd.Series(np.array(sim["net"]), index=dates), pd.Series(np.array(sim["gross"]), index=dates)
+    trades = pd.DataFrame(sim["trades"])
     return {
         "start": dates[0].date(), "end": dates[-1].date(), "initial": initial,
-        "close": close_series, "strategy": strategy, "buy_hold": buy_hold,
-        "weights": weight_series, "trades": trades_df,
-        "metrics": performance(strategy, initial),
-        "bh_metrics": performance(buy_hold, initial),
-        "stats": trade_stats(trades_df, weight_series),
+        "strategy": strategy, "buy_hold": buy_hold,
+        "weights": weights, "gross": gross, "positions": pd.Series(np.array(sim["positions"]), index=dates),
+        "trades": trades, "cash_interest": sim["interest"],
+        "metrics": performance(strategy, initial, cash_rate_pct),
+        "bh_metrics": performance(buy_hold, initial, cash_rate_pct),
+        "stats": trade_stats(trades, weights, gross),
     }
+
+
+def run_backtest(prices, start, end, buy_rule, sell_rule, initial, **options):
+    # one ticker with all the money. options are the other settings of trade_plan and simulate,
+    # e.g. cost_pct=0.02, short_rule="SHORT IF PRICE < MA200", stop_loss_pct=5
+    settings = {"buy_rule": buy_rule, "sell_rule": sell_rule, **options}
+    plan = trade_plan(prices, start, end, **{k: v for k, v in settings.items() if k in PLAN_KEYS})
+    money = {k: v for k, v in settings.items() if k not in PLAN_KEYS}
+    sim = simulate({"": plan}, initial, **money)
+    buy_hold = hold_value(prices, start, end, initial, money.get("cost_pct", 0.1))
+    result = _result(sim, buy_hold, initial, money.get("cash_rate_pct", 0.0))
+    result["close"] = pd.Series(plan["close"], index=plan["dates"])
+    if not result["trades"].empty:
+        result["trades"] = result["trades"].drop(columns="ticker")
+    return result
+
+
+def portfolio_plans(data, start, end, settings):
+    # a ticker without enough prices in the period is left out, e.g. a stock listed after it ended
+    rules = {k: v for k, v in settings.items() if k in PLAN_KEYS}
+    plans, skipped = {}, []
+    for ticker, prices in data.items():
+        try:
+            plans[ticker] = trade_plan(prices, start, end, **rules)
+        except ValueError as e:
+            skipped.append((ticker, str(e)))
+    if not plans:
+        raise ValueError(f"no ticker has enough prices between {start} and {end}")
+    return plans, skipped
+
+
+def run_portfolio(data, start, end, buy_rule, sell_rule, initial, max_weight_pct=None, planned=None, **options):
+    # every ticker in data follows the same rules and they all trade out of one account.
+    # Buy & hold here means: split the money equally over the same tickers and never sell.
+    # planned is the result of portfolio_plans, to save working it out again for the same rules
+    settings = {"buy_rule": buy_rule, "sell_rule": sell_rule, **options}
+    plans, skipped = planned or portfolio_plans(data, start, end, settings)
+    money = {k: v for k, v in settings.items() if k not in PLAN_KEYS}
+    sim = simulate(plans, initial, max_weight_pct=max_weight_pct, **money)
+    each = initial / len(plans)
+    held = {ticker: hold_value(data[ticker], start, end, each, money.get("cost_pct", 0.1))
+            .reindex(sim["dates"]).ffill().fillna(each) for ticker in plans}  # cash until its first day
+    result = _result(sim, sum(held.values()), initial, money.get("cash_rate_pct", 0.0))
+    result["tickers"], result["skipped"] = list(plans), skipped
+    result["per_ticker"] = ticker_breakdown(result["trades"], {t: v.iloc[-1] - each for t, v in held.items()})
+    return result
+
+
+def ticker_breakdown(trades, hold_profit):
+    # where the money was made: each ticker's trades next to what simply holding its slice made
+    rows = []
+    for ticker, bh_profit in hold_profit.items():
+        own = trades[trades["ticker"] == ticker] if not trades.empty else trades
+        closed = own[own["status"] == "closed"] if not own.empty else own
+        rows.append({"Ticker": ticker, "Trades": len(closed),
+                     "Win rate %": round((closed["profit"] > 0).mean() * 100, 1) if len(closed) else None,
+                     "Profit": round(own["profit"].sum(), 2) if len(own) else 0.0,
+                     "Buy & hold profit": round(bh_profit, 2)})
+    table = pd.DataFrame(rows)
+    table["Difference"] = (table["Profit"] - table["Buy & hold profit"]).round(2)
+    return table.sort_values("Profit", ascending=False).reset_index(drop=True)
 
 
 # ---- Performance ----
 
-def performance(values, initial):
+def performance(values, initial, cash_rate_pct=0.0):
+    # Sharpe is the return above what cash earns, per unit of risk
     daily = values.pct_change().fillna(0)
     final = values.iloc[-1]
     years = max((values.index[-1] - values.index[0]).days / 365.25, 1 / 365.25)
     std = daily.std()
+    extra = daily.mean() - (cash_rate_pct or 0.0) / 100 / TRADING_DAYS
     drawdown = (values / values.cummax() - 1) * 100
     return {
         "final": final,
         "total_return": (final / initial - 1) * 100,
         "cagr": ((final / initial) ** (1 / years) - 1) * 100 if final > 0 else -100.0,
         "volatility": std * math.sqrt(TRADING_DAYS) * 100,
-        "sharpe": daily.mean() / std * math.sqrt(TRADING_DAYS) if std > 0 else 0.0,
+        "sharpe": extra / std * math.sqrt(TRADING_DAYS) if std > 0 else 0.0,
         "max_drawdown": drawdown.min(),
         "drawdown": drawdown,
     }
 
 
-def trade_stats(trades_df, weights):
-    base = {"avg_invested": weights.abs().mean() * 100,
-            "time_in_market": (weights != 0).mean() * 100,
+def trade_stats(trades_df, weights, gross=None):
+    # weights: share of the account invested each day, negative when short. gross counts longs and
+    # shorts both as invested, which only differs from weights in a portfolio that holds both
+    gross = weights.abs() if gross is None else gross
+    base = {"avg_invested": gross.mean() * 100,
+            "time_in_market": (gross != 0).mean() * 100,
             "time_long": (weights > 0).mean() * 100,
             "time_short": (weights < 0).mean() * 100}
     closed = trades_df[trades_df["status"] == "closed"] if not trades_df.empty else trades_df
@@ -637,11 +1024,11 @@ def _holding_blocks(weights):
     return blocks
 
 
-def _simple_returns(weights, asset_returns, cost, fee=0.0):
+def _simple_returns(weights, asset_returns, cost, fee=0.0, carry=0.0):
     held = np.concatenate([[0.0], weights[:-1]])
     turnover = np.abs(np.diff(np.concatenate([[0.0], weights])))
     borrow = np.where(held < 0, -held * fee, 0.0)
-    return held * asset_returns - turnover * cost - borrow
+    return held * (asset_returns + carry) - turnover * cost - borrow
 
 
 def _total_and_sharpe(returns):
@@ -650,22 +1037,24 @@ def _total_and_sharpe(returns):
     return (np.prod(1 + returns) - 1) * 100, sharpe
 
 
-def random_benchmark(result, cost_pct, short_fee_pct=0.0, runs=RANDOM_RUNS, seed=42):
+def random_benchmark(result, cost_pct, short_fee_pct=0.0, carry_pct=0.0, runs=RANDOM_RUNS, seed=42):
     # was the timing skill or luck? Keep the strategy's holding periods (same lengths, same long or
-    # short) but drop them at random dates, many times over, and see how many of those it beats
+    # short) but drop them at random dates, many times over, and see how many of those it beats.
+    # Buy & hold's daily moves are the asset's returns with dividends included
     weights = result["weights"]
     blocks = _holding_blocks(weights)
     if not blocks:
         return None
     level = weights[weights != 0].abs().mean()
-    asset_returns = result["close"].pct_change().fillna(0).to_numpy()
+    asset_returns = result["buy_hold"].pct_change().fillna(0).to_numpy()
     cost = cost_pct / 100
     fee = (short_fee_pct or 0.0) / 100 / TRADING_DAYS
+    carry = (carry_pct or 0.0) / 100 / TRADING_DAYS
     n = len(weights)
     free_days = n - sum(length for length, _ in blocks)
     rng = np.random.default_rng(seed)
 
-    own_return, own_sharpe = _total_and_sharpe(_simple_returns(weights.to_numpy(), asset_returns, cost, fee))
+    own_return, own_sharpe = _total_and_sharpe(_simple_returns(weights.to_numpy(), asset_returns, cost, fee, carry))
     returns, sharpes = [], []
     for _ in range(runs):
         order = rng.permutation(len(blocks))
@@ -676,7 +1065,7 @@ def random_benchmark(result, cost_pct, short_fee_pct=0.0, runs=RANDOM_RUNS, seed
             length, direction = blocks[j]
             fake[position:position + length] = direction * level
             position += length + gap
-        total, sharpe = _total_and_sharpe(_simple_returns(fake, asset_returns, cost, fee))
+        total, sharpe = _total_and_sharpe(_simple_returns(fake, asset_returns, cost, fee, carry))
         returns.append(total)
         sharpes.append(sharpe)
 
@@ -870,23 +1259,107 @@ def improve_rules(prices, start, end, settings, split_date, full, test, min_trad
 
 # ---- Analysis and verdict ----
 
-def analyse_ticker(prices, start, end, settings, split_date=None, advanced=True):
+def compare_sp500(full, fund, settings):
+    # the same money put into the S&P 500 on the first day and left there, valued on the strategy's days
+    days = full["strategy"].index
+    try:
+        held = hold_value(fund, days[0], days[-1] + pd.Timedelta(days=1), full["initial"], settings["cost_pct"])
+    except ValueError:
+        return None
+    if (held.index[0] - days[0]).days > 7:
+        return None  # the fund's prices start later than the backtest (SPY began in 1993)
+    values = held.reindex(days).ffill().fillna(full["initial"])
+    return {"values": values, "metrics": performance(values, full["initial"], settings.get("cash_rate_pct", 0.0))}
+
+
+def _finish(full, no_cost, late, train, test, random, sens, variants, advanced, settings, sp500_fund):
+    label, notes = verdict(full, no_cost, train, test, random, sens, late)
+    sp500 = compare_sp500(full, sp500_fund, settings) if sp500_fund is not None else None
+    if sp500:
+        ours, theirs = full["metrics"]["total_return"], sp500["metrics"]["total_return"]
+        notes.append(f"{'Beat' if ours > theirs else 'Lost to'} the S&P 500 ({ours:.1f}% vs {theirs:.1f}%)")
+    return {"full": full, "no_cost": no_cost, "late": late, "train": train, "test": test, "random": random,
+            "sens": sens, "variants": variants, "label": label, "notes": notes, "advanced": advanced,
+            "sp500": sp500, "portfolio": "tickers" in full}
+
+
+def analyse_ticker(prices, start, end, settings, split_date=None, advanced=True, sp500_fund=None):
+    # two reruns come with every backtest: one without costs, and one where every order is filled
+    # a day late. A result that needs free trading or perfect timing would not survive real trading
     full = run_backtest(prices, start, end, **settings)
     no_cost = run_backtest(prices, start, end, **{**settings, "cost_pct": 0.0, "short_fee_pct": 0.0})
+    late = run_backtest(prices, start, end, **{**settings, "delay_days": 1})
     train = test = random = sens = variants = None
     if advanced:
         if split_date:
             train = run_backtest(prices, start, split_date, **settings)
             test = run_backtest(prices, split_date, end, **settings)
-        random = random_benchmark(full, settings["cost_pct"], settings.get("short_fee_pct", 0.0))
+        random = random_benchmark(full, settings["cost_pct"], settings.get("short_fee_pct", 0.0),
+                                  settings.get("carry_pct", 0.0))
         sens = sensitivity(prices, start, end, settings, full)
         variants = improve_rules(prices, start, end, settings, split_date, full, test)
-    label, notes = verdict(full, no_cost, train, test, random, sens)
-    return {"full": full, "no_cost": no_cost, "train": train, "test": test, "random": random,
-            "sens": sens, "variants": variants, "label": label, "notes": notes, "advanced": advanced}
+    r = _finish(full, no_cost, late, train, test, random, sens, variants, advanced, settings, sp500_fund)
+    r["data_notes"] = data_notes(prices)
+    return r
 
 
-def verdict(full, no_cost=None, train=None, test=None, random=None, sens=None):
+def analyse_portfolio(data, start, end, settings, split_date=None, advanced=True, max_weight_pct=None,
+                      sp500_fund=None):
+    # the random benchmark, the sensitivity check and the number search look at one price series,
+    # so a portfolio is judged on costs and on the train/test split
+    planned = portfolio_plans(data, start, end, settings)
+    full = run_portfolio(data, start, end, **settings, max_weight_pct=max_weight_pct, planned=planned)
+    no_cost = run_portfolio(data, start, end, **{**settings, "cost_pct": 0.0, "short_fee_pct": 0.0},
+                            max_weight_pct=max_weight_pct, planned=planned)
+    late = run_portfolio(data, start, end, **{**settings, "delay_days": 1}, max_weight_pct=max_weight_pct)
+    train = test = None
+    if advanced and split_date:
+        train = run_portfolio(data, start, split_date, **settings, max_weight_pct=max_weight_pct)
+        test = run_portfolio(data, split_date, end, **settings, max_weight_pct=max_weight_pct)
+    r = _finish(full, no_cost, late, train, test, None, None, None, advanced, settings, sp500_fund)
+    r["data_notes"] = [f"{t}: {note}" for t in full["tickers"] for note in data_notes(data[t])
+                       if note.startswith("Removed")]
+    return r
+
+
+def scan_tickers(data, start, end, settings, progress=None):
+    # one backtest per ticker, each with the full starting money: does the rule work across the
+    # board, or only on the ticker it was designed on? Returns (table, [(ticker, why it was skipped)])
+    rows, failed = [], []
+    for done, (ticker, prices) in enumerate(data.items(), 1):
+        try:
+            full = run_backtest(prices, start, end, **settings)
+            s, b = full["metrics"], full["bh_metrics"]
+            rows.append({"Ticker": ticker, "Return %": round(s["total_return"], 1),
+                         "B&H %": round(b["total_return"], 1),
+                         "Difference": round(s["total_return"] - b["total_return"], 1),
+                         "Sharpe": round(s["sharpe"], 2), "B&H Sharpe": round(b["sharpe"], 2),
+                         "Max DD %": round(s["max_drawdown"], 1), "B&H Max DD %": round(b["max_drawdown"], 1),
+                         "Trades": full["stats"]["trades"],
+                         "In market %": round(full["stats"]["time_in_market"]),
+                         "From": full["start"]})
+        except Exception as e:
+            failed.append((ticker, str(e)))
+        if progress:
+            progress(done, len(data))
+    return pd.DataFrame(rows), failed
+
+
+def scan_summary(table):
+    n = len(table)
+    return {
+        "tickers": n,
+        "beat_return": int((table["Return %"] > table["B&H %"]).sum()),
+        "beat_sharpe": int((table["Sharpe"] > table["B&H Sharpe"]).sum()),
+        "smaller_drawdown": int((table["Max DD %"] > table["B&H Max DD %"]).sum()),
+        "made_money": int((table["Return %"] > 0).sum()),
+        "median_return": float(table["Return %"].median()), "median_bh": float(table["B&H %"].median()),
+        "median_sharpe": float(table["Sharpe"].median()), "median_bh_sharpe": float(table["B&H Sharpe"].median()),
+        "no_trades": int((table["Trades"] == 0).sum()),
+    }
+
+
+def verdict(full, no_cost=None, train=None, test=None, random=None, sens=None, late=None):
     # every check adds or removes points, and the checks that are hardest to pass by luck count double
     s, b, st = full["metrics"], full["bh_metrics"], full["stats"]
     notes, score = [], 0
@@ -909,6 +1382,11 @@ def verdict(full, no_cost=None, train=None, test=None, random=None, sens=None):
         notes.append(f"Worse Sharpe ({s['sharpe']:.2f} vs {b['sharpe']:.2f})")
         score -= 1
 
+    if st["trades"] and s["total_return"] <= 0:
+        # losing less than a falling market is not an edge
+        notes.append(f"Lost money ({s['total_return']:.1f}%)")
+        score -= 2
+
     if s["max_drawdown"] > b["max_drawdown"]:
         notes.append(f"Smaller max drawdown ({s['max_drawdown']:.1f}% vs {b['max_drawdown']:.1f}%)")
         score += 1
@@ -921,6 +1399,13 @@ def verdict(full, no_cost=None, train=None, test=None, random=None, sens=None):
         notes.append(f"Costs took {eaten:.1f} points of return")
         if no_cost["metrics"]["total_return"] > b["total_return"] >= s["total_return"]:
             notes.append("Only beats buy & hold before costs")
+            score -= 1
+
+    if late is not None and st["trades"]:
+        notes.append(f"Filled a day late it makes {late['metrics']['total_return']:.1f}% instead of "
+                     f"{s['total_return']:.1f}%")
+        if s["total_return"] > b["total_return"] >= late["metrics"]["total_return"]:
+            notes.append("Only beats buy & hold when every order is filled straight away")
             score -= 1
 
     if st["top_trade_share"] > 50:
@@ -987,11 +1472,15 @@ def shorting_on(settings):
     return parse_rule(settings.get("short_rule", "")) is not None
 
 
-def print_settings(tickers, start, end, settings, split_date, advanced):
+def print_settings(tickers, start, end, settings, split_date, advanced, portfolio=False, max_weight_pct=None):
     s = settings
+    shown = ", ".join(tickers[:8]) + (f" and {len(tickers) - 8} more" if len(tickers) > 8 else "")
     print("\nSettings")
     print(f"  Mode:            {'advanced' if advanced else 'quick'}")
-    print(f"  Tickers:         {', '.join(tickers)}")
+    print(f"  Tickers:         {shown}")
+    if len(tickers) > 1:
+        split = f"spread over open positions, at most {max_weight_pct:g}% each" if max_weight_pct else "an equal slice each"
+        print(f"  Money:           {'one portfolio, ' + split if portfolio else 'each ticker on its own'}")
     print(f"  Period:          {start} to {end}")
     if advanced:
         print(f"  Split:           {describe(split_date, off='none')}")
@@ -1012,6 +1501,15 @@ def print_settings(tickers, start, end, settings, split_date, advanced):
         print(f"  Rebalance band:  {s['rebalance_pct']}%")
         print(f"  Stop loss:       {describe(s['stop_loss_pct'], '%')}")
         print(f"  Take profit:     {describe(s['take_profit_pct'], '%')}")
+        print(f"  Carry:           {s.get('carry_pct', 0)}% a year")
+        print(f"  Cash interest:   {s.get('cash_rate_pct', 0)}% a year")
+
+
+def print_data_notes(r):
+    for note in r["data_notes"][:5]:
+        print(f"Data: {note}")
+    if len(r["data_notes"]) > 5:
+        print(f"Data: ... and {len(r['data_notes']) - 5} more repairs")
 
 
 def print_rule_check(ticker, r, settings):
@@ -1029,26 +1527,35 @@ def print_rule_check(ticker, r, settings):
 def print_report(ticker, r):
     full = r["full"]
     s, b, st = full["metrics"], full["bh_metrics"], full["stats"]
+    columns = [("Strategy", s), ("Buy & hold", b)] + ([("S&P 500", r["sp500"]["metrics"])] if r["sp500"] else [])
     print(f"\n{ticker}, {full['start']} to {full['end']}")
-    print(f"{'':18}{'Strategy':>12}{'Buy & hold':>14}")
+    print(f"{'':18}" + "".join(f"{name:>14}" for name, _ in columns))
     rows = [
-        ("Final value", money(s["final"]), money(b["final"])),
-        ("Total return", f"{s['total_return']:.2f}%", f"{b['total_return']:.2f}%"),
-        ("Per year", f"{s['cagr']:.2f}%", f"{b['cagr']:.2f}%"),
-        ("Volatility", f"{s['volatility']:.2f}%", f"{b['volatility']:.2f}%"),
-        ("Sharpe", f"{s['sharpe']:.2f}", f"{b['sharpe']:.2f}"),
-        ("Max drawdown", f"{s['max_drawdown']:.2f}%", f"{b['max_drawdown']:.2f}%"),
+        ("Final value", lambda m: money(m["final"])),
+        ("Total return", lambda m: f"{m['total_return']:.2f}%"),
+        ("Per year", lambda m: f"{m['cagr']:.2f}%"),
+        ("Volatility", lambda m: f"{m['volatility']:.2f}%"),
+        ("Sharpe", lambda m: f"{m['sharpe']:.2f}"),
+        ("Max drawdown", lambda m: f"{m['max_drawdown']:.2f}%"),
     ]
-    for name, a, c in rows:
-        print(f"{name:18}{a:>12}{c:>14}")
+    for name, show in rows:
+        print(f"{name:18}" + "".join(f"{show(m):>14}" for _, m in columns))
+    if r["portfolio"]:
+        print(f"Buy & hold = the money split equally over the {len(full['tickers'])} tickers and never sold")
 
     pf = "inf" if st["profit_factor"] == float("inf") else f"{st['profit_factor']:.2f}"
     print(f"\nTrades: {st['trades']} ({st['long_trades']} long, {st['short_trades']} short), "
           f"win rate {st['win_rate']:.1f}%, profit factor {pf}")
     print(f"Avg win {st['avg_win']:.2f}%, avg loss {st['avg_loss']:.2f}%, "
           f"best {st['best']:.2f}%, worst {st['worst']:.2f}%")
-    print(f"Avg {st['avg_days']:.1f} days per trade, long {st['time_long']:.0f}% of days, "
-          f"short {st['time_short']:.0f}%, out {100 - st['time_in_market']:.0f}%")
+    if r["portfolio"]:
+        print(f"Avg {st['avg_days']:.1f} days per trade, {st['avg_invested']:.0f}% of the money invested on average, "
+              f"{full['positions'].mean():.1f} positions open on average")
+    else:
+        print(f"Avg {st['avg_days']:.1f} days per trade, long {st['time_long']:.0f}% of days, "
+              f"short {st['time_short']:.0f}%, out {100 - st['time_in_market']:.0f}%")
+    if full["cash_interest"]:
+        print(f"Interest earned on cash: {money(full['cash_interest'])}")
 
     if r["train"] is not None:
         print("\nTrain vs test")
@@ -1077,6 +1584,44 @@ def print_report(ticker, r):
             "strategy_%": "Strategy %", "buy_hold_%": "Buy & hold %", "difference_%": "Difference"})
         print("\nBy year")
         print(indent(yearly.to_string(), 2))
+
+
+def print_per_ticker(r, top_n=5):
+    table, full = r["full"]["per_ticker"], r["full"]
+    for ticker, reason in full["skipped"]:
+        print(f"Left out {ticker}: {reason}")
+    print("\nWhere the money was made (profit next to simply holding that ticker's slice)")
+    if len(table) <= 2 * top_n:
+        print(indent(table.to_string(index=False), 2))
+    else:
+        print(indent(table.head(top_n).to_string(index=False), 2))
+        print(f"  ... {len(table) - 2 * top_n} more ...")
+        print(indent(table.tail(top_n).to_string(index=False, header=False), 2))
+
+
+def print_scan(table, failed):
+    for ticker, reason in failed:
+        print(f"Skipped {ticker}: {reason}")
+    if table.empty:
+        print("No ticker could be tested.")
+        return
+    s = scan_summary(table)
+    print(f"\n{s['tickers']} tickers, each tested on its own with the full starting money")
+    print(f"  Beat buy & hold on return:    {s['beat_return']} of {s['tickers']}")
+    print(f"  Better Sharpe than buy & hold: {s['beat_sharpe']} of {s['tickers']}")
+    print(f"  Smaller max drawdown:          {s['smaller_drawdown']} of {s['tickers']}")
+    print(f"  Median return:  strategy {s['median_return']:.1f}%, buy & hold {s['median_bh']:.1f}%")
+    print(f"  Median Sharpe:  strategy {s['median_sharpe']:.2f}, buy & hold {s['median_bh_sharpe']:.2f}")
+    if s["no_trades"]:
+        print(f"  The rules never traded on {s['no_trades']} tickers")
+    ranked = table.sort_values("Difference", ascending=False)
+    if len(ranked) <= 30:
+        print("\n" + indent(ranked.to_string(index=False), 2))
+    else:
+        print("\nBest 10 against buy & hold")
+        print(indent(ranked.head(10).to_string(index=False), 2))
+        print("\nWorst 10 against buy & hold")
+        print(indent(ranked.tail(10).to_string(index=False), 2))
 
 
 def print_breakdown(r, top_n=10):
@@ -1180,6 +1725,78 @@ def print_summary(rows):
 
 # ---- Charts ----
 
+SP500_STYLE = {"color": "#7b3294", "linestyle": "-.", "label": "S&P 500"}
+
+
+def _plot_value(ax, r, bh_label="Buy & hold"):
+    full = r["full"]
+    ax.plot(full["strategy"].index, full["strategy"].values, label="Strategy", linewidth=1.5)
+    ax.plot(full["buy_hold"].index, full["buy_hold"].values, label=bh_label, color="red", linestyle="--")
+    if r["sp500"]:
+        ax.plot(r["sp500"]["values"].index, r["sp500"]["values"].values, **SP500_STYLE)
+    ax.set_title("Account value")
+    ax.legend(loc="upper left")
+
+
+def _plot_drawdown(ax, r, bh_label="Buy & hold"):
+    full = r["full"]
+    dd, bh_dd = full["metrics"]["drawdown"], full["bh_metrics"]["drawdown"]
+    ax.plot(dd.index, dd.values, label="Strategy")
+    ax.plot(bh_dd.index, bh_dd.values, color="red", linestyle="--", label=bh_label)
+    if r["sp500"]:
+        sp_dd = r["sp500"]["metrics"]["drawdown"]
+        ax.plot(sp_dd.index, sp_dd.values, **SP500_STYLE)
+    ax.set_title("Drawdown (%)")
+    ax.legend(loc="lower left")
+
+
+def plot_portfolio(r, split_date=None):
+    full = r["full"]
+    weights, gross = full["weights"] * 100, full["gross"] * 100
+    has_shorts = bool((weights < gross - 1e-9).any())
+    fig, axes = plt.subplots(4, 1, figsize=(13, 12), sharex=True, gridspec_kw={"height_ratios": [2, 1, 1, 1]})
+    held_label = f"Hold all {len(full['tickers'])} equally"
+    _plot_value(axes[0], r, held_label)
+    axes[0].set_title(f"Portfolio of {len(full['tickers'])} tickers: account value")
+
+    axes[1].fill_between(gross.index, gross.values, step="post", color="green", alpha=0.4,
+                         label="Invested, longs and shorts")
+    if has_shorts:
+        axes[1].plot(weights.index, weights.values, color="black", linewidth=1, drawstyle="steps-post",
+                     label="Longs minus shorts")
+        axes[1].axhline(0, color="black", linewidth=0.5)
+        axes[1].legend(loc="upper left")
+    axes[1].set_title("% of money invested")
+
+    axes[2].fill_between(full["positions"].index, full["positions"].values, step="post", color="grey", alpha=0.5)
+    axes[2].set_title("Positions open")
+    _plot_drawdown(axes[3], r, held_label)
+
+    if split_date:
+        for ax in axes:
+            ax.axvline(pd.Timestamp(split_date), color="grey", linestyle=":")
+    plt.tight_layout()
+    return fig
+
+
+def plot_scan(table):
+    # one bar per ticker would not fit, so show how the tickers are spread: each one's Sharpe
+    # minus the Sharpe of holding it. Right of the line the rule did better
+    diff = (table["Sharpe"] - table["B&H Sharpe"]).to_numpy()
+    fig, ax = plt.subplots(figsize=(13, 4.5))
+    edge = max(np.percentile(np.abs(diff), 98), 0.1)  # the odd extreme ticker is stacked in the end bar
+    ax.hist(np.clip(diff, -edge, edge), bins=np.linspace(-edge, edge, 41), color="grey", alpha=0.7)
+    ax.axvline(0, color="black", linewidth=1)
+    ax.axvline(np.median(diff), color="blue", linewidth=2, label=f"Median {np.median(diff):+.2f}")
+    ax.set_title(f"Sharpe of the rule minus Sharpe of buy & hold, {len(diff)} tickers "
+                 f"({int((diff > 0).sum())} better, {int((diff <= 0).sum())} not)")
+    ax.set_xlabel("Difference in Sharpe (right of 0 = the rule did better)")
+    ax.set_ylabel("Tickers")
+    ax.legend()
+    plt.tight_layout()
+    return fig
+
+
 def plot_results(ticker, r, split_date=None, compact=False):
     full = r["full"]
     close, weights, trades = full["close"], full["weights"], full["trades"]
@@ -1210,11 +1827,7 @@ def plot_results(ticker, r, split_date=None, compact=False):
     price_ax.set_title(f"{ticker}: price ({title})")
     price_ax.legend(loc="upper left")
 
-    equity_ax.plot(full["strategy"].index, full["strategy"].values, label="Strategy", linewidth=1.5)
-    equity_ax.plot(full["buy_hold"].index, full["buy_hold"].values, label="Buy & hold",
-                   color="red", linestyle="--")
-    equity_ax.set_title("Portfolio value")
-    equity_ax.legend(loc="upper left")
+    _plot_value(equity_ax, r)
 
     if not compact:
         weight_ax, dd_ax = axes[2], axes[3]
@@ -1224,13 +1837,7 @@ def plot_results(ticker, r, split_date=None, compact=False):
         weight_ax.set_ylim(-105 if has_shorts else 0, 105)
         weight_ax.axhline(0, color="black", linewidth=0.5)
         weight_ax.set_title("% of money invested (negative = short)" if has_shorts else "% of money invested")
-
-        dd = full["metrics"]["drawdown"]
-        bh_dd = full["bh_metrics"]["drawdown"]
-        dd_ax.plot(dd.index, dd.values, label="Strategy")
-        dd_ax.plot(bh_dd.index, bh_dd.values, color="red", linestyle="--", label="Buy & hold")
-        dd_ax.set_title("Drawdown (%)")
-        dd_ax.legend(loc="lower left")
+        _plot_drawdown(dd_ax, r)
 
     if split_date:
         for ax in axes:
@@ -1286,26 +1893,66 @@ def plot_checks(ticker, r):
     return fig
 
 
-# ---- Input ----
-
-def as_tickers(text):
-    return [t.strip().upper() for t in text.split(",") if t.strip()]
-
-
 # ---- Run ----
 
-def run_study(tickers, start, end, settings, split_date, advanced):
-    print_settings(tickers, start, end, settings, split_date, advanced)
-    rows = []
-    for ticker in tickers:
-        print(f"\nLoading {ticker}...")
+def _loading(done, total):
+    if total > DOWNLOAD_CHUNK:
+        print(f"  {done} of {total} loaded")
+
+
+def run_study(tickers, start, end, settings, split_date, advanced, portfolio=False, max_weight_pct=None,
+              compare_sp500=False):
+    # several tickers are tested one by one, each with the full starting money, or as one
+    # portfolio that shares it. More than MAX_DETAILED tickers one by one get a quick backtest each
+    portfolio = portfolio and len(tickers) > 1
+    print_settings(tickers, start, end, settings, split_date, advanced, portfolio, max_weight_pct)
+    print(f"\nLoading {', '.join(tickers) if len(tickers) <= 8 else str(len(tickers)) + ' tickers'}...")
+    data, failed = load_many(tickers, start, end, _loading)
+    for ticker, reason in failed:
+        print(f"Skipped {ticker}: {reason}")
+    sp500_fund = None
+    if compare_sp500:
         try:
-            prices = load_prices(ticker, start, end)
-            r = analyse_ticker(prices, start, end, settings, split_date, advanced)
+            sp500_fund = load_prices(SP500_FUND, start, end)
+        except Exception as e:
+            print(f"No S&P 500 comparison: {e}")
+    if not data:
+        return
+
+    if portfolio:
+        try:
+            r = analyse_portfolio(data, start, end, settings, split_date, advanced, max_weight_pct, sp500_fund)
+        except Exception as e:
+            print(f"The portfolio could not be tested: {e}")
+            return
+        name = f"Portfolio of {len(r['full']['tickers'])} tickers"
+        print_data_notes(r)
+        if print_rule_check(name, r, settings):
+            print_report(name, r)
+            print_per_ticker(r)
+        print_verdict(r)
+        plot_portfolio(r, split_date)
+        plt.show()
+        return
+
+    if len(data) > MAX_DETAILED:
+        table, skipped = scan_tickers(data, start, end, settings)
+        print_scan(table, skipped)
+        if not table.empty:
+            plot_scan(table)
+            plt.show()
+            print("\nFor the full checks on one of them, run it again with just that ticker.")
+        return
+
+    rows = []
+    for ticker, prices in data.items():
+        try:
+            r = analyse_ticker(prices, start, end, settings, split_date, advanced, sp500_fund)
         except Exception as e:
             print(f"Skipped {ticker}: {e}")
             continue
 
+        print_data_notes(r)
         traded = print_rule_check(ticker, r, settings)
         print_report(ticker, r)
         if traded:
