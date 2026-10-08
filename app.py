@@ -1,5 +1,6 @@
 """Streamlit front end for the backtester. Run with: streamlit run app.py"""
 
+import os
 import time
 from contextlib import ExitStack, contextmanager
 from io import BytesIO
@@ -85,6 +86,7 @@ COVER IF ZSCORE20 < 0
 Signals use the close and trades happen at the next day's open. Dividends are paid into the account.
 """
 
+CODE = f"{bt.__version__} {os.path.getmtime(bt.__file__)} {os.path.getmtime(__file__)}"
 OWN_TICKERS = "My own tickers"
 SEPARATE, SHARED = "Each ticker on its own", "One shared portfolio"
 SPLITS = {"Decided by the app": "smart", "An equal slice per ticker": "equal",
@@ -133,6 +135,34 @@ def load_data(tickers, start, end, status=None):
             status("Loading prices", min(i + bt.DOWNLOAD_CHUNK, len(tickers)), len(tickers))
     return data, failed
 
+
+# the tutorial at the top of the page. Each step has the same number as its group in the sidebar
+STEPS = {
+    False: [
+        ("1. Pick what to test",
+         "Type a ticker such as `SPY` or `EURUSD=X`, or choose a ready-made list. Then set the dates."),
+        ("2. Write the rules",
+         "Say when to buy and when to sell, for example `BUY IF PRICE > MA200`. The short rules are optional."),
+        ("3. Set the cost and run",
+         "Enter what one trade costs and press **Run backtest**. The result and a verdict appear below."),
+    ],
+    True: [
+        ("1. Pick what to test",
+         "Type a ticker such as `SPY` or `EURUSD=X`, or choose a ready-made list. Then set the dates."),
+        ("2. Write the rules",
+         "Say when to buy and when to sell, for example `BUY IF PRICE > MA200`. The short rules are optional."),
+        ("3. Set costs and a comparison",
+         "Enter what one trade costs. Tick the box to see the S&P 500 next to your result."),
+        ("4. Split the period in two",
+         "Pick a split date. The rules are judged before and after it, which catches rules fitted to the past."),
+        ("5. Adjust the details",
+         "Optional: starting money, position size, stop loss, take profit, interest, and how a portfolio "
+         "splits its money."),
+        ("6. Run it and read the checks",
+         "Press **Run backtest**. Advanced adds a random benchmark, a sensitivity check and a search for "
+         "better numbers."),
+    ],
+}
 
 YEAR_TIP = ("To jump to another year, click the year in the box and type it. The calendar's own year "
             "list only reaches 10 years each way.")
@@ -197,7 +227,7 @@ def sidebar_inputs():
     }
     sb.caption("How to write rules is explained on the right.")
 
-    sb.markdown("##### 3. Costs and comparison")
+    sb.markdown("##### 3. Costs and comparison" if advanced else "##### 3. Cost, then run")
     settings["cost_pct"] = sb.number_input("Cost per trade (%)", min_value=0.0, value=float(d["cost_pct"]),
                                            step=0.01, format="%.2f", help="About 0.02 for FX, 0.1 for stocks.")
     compare_sp500 = sb.checkbox("Compare to the S&P 500", value=False,
@@ -207,7 +237,15 @@ def sidebar_inputs():
     split_date = max_weight_pct = None
     allocation = "smart"
     if advanced:
-        sb.markdown("##### 4. More settings")
+        sb.markdown("##### 4. Train/test split")
+        if sb.checkbox("Judge the rules on two periods", value=True,
+                       help="Rules are judged separately before and after the split date. A rule that "
+                            "only works before it was probably fitted to the past."):
+            split_date = sb.date_input("Split date", pd.Timestamp(d["split_date"]).date(),
+                                       min_value=date(1970, 1, 1), max_value=date.today(),
+                                       help="Must be after the start date and before the end date. " + YEAR_TIP)
+
+        sb.markdown("##### 5. Details (optional)")
         if portfolio:
             with sb.expander("How the portfolio splits its money", expanded=True):
                 allocation = SPLITS[st.radio(
@@ -221,13 +259,6 @@ def sidebar_inputs():
                         "Most in one ticker (%)", min_value=1.0, max_value=100.0, step=5.0,
                         value=float(d["max_weight_pct"]) if allocation == "spread" else None,
                         placeholder="automatic", help="Left empty, no ticker gets more than twice an equal slice.")
-        with sb.expander("Train/test split", expanded=True):
-            if st.checkbox("Judge the rules on two periods", value=True,
-                           help="Rules are judged separately before and after the split date. A rule that "
-                                "only works before it was probably fitted to the past."):
-                split_date = st.date_input("Split date", pd.Timestamp(d["split_date"]).date(),
-                                           min_value=date(1970, 1, 1), max_value=date.today(),
-                                           help="Must be after the start date and before the end date. " + YEAR_TIP)
         with sb.expander("Money and position size"):
             settings["initial"] = st.number_input("Starting money", min_value=1.0, value=float(d["initial"]),
                                                   step=1000.0, format="%.0f")
@@ -263,6 +294,7 @@ def sidebar_inputs():
             settings["cash_rate_pct"] = st.number_input(
                 "Interest on cash (% per year)", min_value=0.0, value=float(d["cash_rate_pct"]), step=0.25,
                 help="Earned on money that is not invested. Sharpe then counts only the return above it.")
+        sb.markdown("##### 6. Run")
     else:
         sb.caption("Quick mode uses 10,000 starting money, fully invested, no stops.")
 
@@ -328,7 +360,7 @@ def analyse(inputs, status=None):
     # a study is one of three kinds. "tickers": a few tickers, each with every check. "scan": many
     # tickers with one quick backtest each. "portfolio": all of them trading out of one account
     start, end, settings = inputs["start"], inputs["end"], inputs["settings"]
-    study = {**inputs, "kind": "tickers", "results": {}, "details": {}, "fund": None}
+    study = {**inputs, "kind": "tickers", "results": {}, "details": {}, "fund": None, "code": CODE}
     try:
         study["data"], study["failed"] = load_data(inputs["tickers"], start, end, status)
     except Exception as e:
@@ -367,7 +399,8 @@ def analyse(inputs, status=None):
 
 
 @st.cache_data(show_spinner=False)
-def pendulum_study(end):
+def pendulum_study(end, code):
+    # code changes whenever the app is updated, so a result worked out by older code is not reused
     d = bt.DEFAULT_STUDY
     return analyse({"tickers": d["tickers"], "universe": None, "start": d["start"], "end": end,
                     "settings": dict(d["settings"]), "split_date": d["split_date"], "advanced": True,
@@ -400,7 +433,7 @@ MARKS = {"+": ":green[**✓**]", "-": ":red[**✗**]", "": ":gray[–]"}
 
 def show_verdict(r, settings):
     trades = r["full"]["trades"]
-    notes = list(zip(r["marks"], r["notes"]))
+    notes = list(zip(r.get("marks") or [""] * len(r["notes"]), r["notes"]))  # a result from before marks existed
     if trades.empty:
         notes.insert(0, ("-", "No trades: the rules never opened a position"))
     else:
@@ -788,16 +821,17 @@ def main():
     st.markdown(STYLE, unsafe_allow_html=True)
     st.title("Backtester")
     st.write("Test a trading rule on past prices and find out whether it had an edge or was just lucky.")
-    steps = [("1. Pick what to test", "One ticker, several, or a whole list such as the S&P 500 stocks."),
-             ("2. Write the rules", "Plain text, for example `BUY IF PRICE > MA200`."),
-             ("3. Run it", "You get the result next to buy and hold, and a verdict from a set of checks.")]
-    for column, (title, text) in zip(st.columns(3), steps):
-        with column.container(border=True):
-            st.markdown(f"**{title}**")
-            st.caption(text)
-    st.caption("All three steps are in the sidebar on the left. Or try the example below first.")
-
     run_custom, raw_inputs = sidebar_inputs()
+    steps = STEPS[raw_inputs["advanced"]]
+    for row in range(0, len(steps), 3):
+        for column, (title, text) in zip(st.columns(3), steps[row:row + 3]):
+            # "stretch" makes the boxes of a row as tall as the tallest, whatever the length of their text
+            with column.container(border=True, height="stretch"):
+                st.markdown(f"**{title}**")
+                st.caption(text)
+    st.caption(f"The {len(steps)} steps are in the sidebar on the left, under the same numbers. "
+               + ("Quick mode leaves out the settings most tests do not need. " if not raw_inputs["advanced"] else "")
+               + "Or try the example below first.")
     with st.expander("How to write rules"):
         st.markdown(GUIDE)
     run_default = pendulum_card()
@@ -807,7 +841,7 @@ def main():
     if run_default:
         st.session_state["problems"] = []
         with running("Running the pendulum study. This can take a minute..."):
-            study = pendulum_study(date.today().isoformat())
+            study = pendulum_study(date.today().isoformat(), CODE)
         if not study["results"]:
             pendulum_study.clear()  # e.g. Yahoo was unreachable: try again next time
         st.session_state["study"] = {**study, "title": "Pendulum study"}
@@ -821,6 +855,9 @@ def main():
 
     for problem in st.session_state.get("problems", []):
         st.error(problem)
+    if st.session_state.get("study", {}).get("code", CODE) != CODE:
+        st.session_state.pop("study")  # worked out before the app was updated: its shape may no longer fit
+        st.info("The app was updated since that result was made. Run it again to see it.")
     if "study" in st.session_state:
         show_study(st.session_state["study"])
     if run_default or run_custom:
