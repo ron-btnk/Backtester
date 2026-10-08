@@ -27,6 +27,7 @@ Version 2 makes the simulation closer to real trading and adds testing on many t
 - **Compare to the S&P 500.** A tick box adds an S&P 500 fund (SPY, dividends reinvested) to the numbers and charts.
 - Prices for many tickers load in batches with a progress bar.
 - The app draws each chart once per result and reuses it, so the page no longer takes seconds to respond to every click.
+- A tidier app: the sidebar is grouped into numbered steps with the rarely used settings folded away, the home page starts with what to do, and the verdict marks each point as speaking for or against the rules.
 - `__version__`, shown in the app and the notebook.
 
 ### Changed for anyone using `backtester.py` directly
