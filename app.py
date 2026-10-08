@@ -74,14 +74,38 @@ COVER IF ZSCORE20 < 0
 - **Shorting** is optional. Leave the short rule blank to stay long-only. Leave the cover rule blank
   to use the opposite of the short rule
 - **Sizing** (advanced): `SIZE BY RSI14 FROM 40 TO 20` holds 0% at RSI 40 and 100% at RSI 20
+- **Stop loss and take profit** (advanced) are measured from the price the trade was opened at. They
+  fill during the day at their level, or at the open if the price jumped past it overnight. After
+  one of them closes a trade, the rule has to switch off and on again before it re-enters
+- **Several tickers** are tested one by one, each with the full starting money, or as one portfolio
+  that shares it
 
-Signals use the close and trades happen at the next day's open.
+Signals use the close and trades happen at the next day's open. Dividends are paid into the account.
 """
 
+OWN_TICKERS = "My own tickers"
+SEPARATE, SHARED = "Each ticker on its own", "One shared portfolio"
+EQUAL, SPREAD = "An equal slice per ticker", "Spread over open positions"
+SURVIVORS = ("These are today's S&P 500 members. Companies that went bust or were dropped along the way are "
+             "missing, so every number here, buy & hold included, looks better than it could have been in "
+             "real time. Compare the rule with holding the same stocks, not with the index.")
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_prices(ticker, start, end):
-    return bt.load_prices(ticker, start, end)
+
+@st.cache_resource(show_spinner=False, ttl=3600, max_entries=60)
+def load_chunk(tickers, start, end):
+    # shared between reruns and never changed after loading, so it is cached without copying
+    return bt.load_many(list(tickers), start, end)
+
+
+def load_data(tickers, start, end, status=None):
+    data, failed = {}, []
+    for i in range(0, len(tickers), bt.DOWNLOAD_CHUNK):
+        loaded, missing = load_chunk(tuple(tickers[i:i + bt.DOWNLOAD_CHUNK]), start, end)
+        data.update(loaded)
+        failed += missing
+        if status and len(tickers) > bt.DOWNLOAD_CHUNK:
+            status("Loading prices", min(i + bt.DOWNLOAD_CHUNK, len(tickers)), len(tickers))
+    return data, failed
 
 
 def sidebar_inputs():
@@ -91,8 +115,33 @@ def sidebar_inputs():
     advanced = sb.radio("Mode", ["Quick", "Advanced"], horizontal=True,
                         help="Advanced adds a train/test split, a random benchmark, a sensitivity "
                              "check and a search for better numbers. It takes longer.") == "Advanced"
-    tickers = sb.text_input("Tickers", ", ".join(d["tickers"]),
-                            help="Yahoo Finance symbols, separated by commas. E.g. EURUSD=X, SPY, AAPL")
+
+    lists = {label: key for key, label in bt.UNIVERSES.items()}
+    choice = sb.selectbox("What to test", [OWN_TICKERS, *lists],
+                          help="Your own tickers, or a ready-made list to see whether a rule works "
+                               "across a whole market and not just on one ticker.")
+    universe = lists.get(choice)
+    tickers = ""
+    if universe is None:
+        tickers = sb.text_input("Tickers", ", ".join(d["tickers"]),
+                                help="Yahoo Finance symbols, separated by commas. E.g. EURUSD=X, SPY, AAPL")
+        count = len(bt.as_tickers(tickers))
+    else:
+        count = len(bt.universe(universe))
+        if universe == "SP500":
+            sb.caption(f"{count} stocks. Loading and testing them takes a few minutes, and is quicker "
+                       "when you run the app on your own computer.")
+
+    portfolio = False
+    if count > 1:
+        portfolio = sb.radio("Money", [SEPARATE, SHARED],
+                             help="On its own: every ticker gets the full starting money and its own "
+                                  "result. Shared: one account trades all of them, so the starting "
+                                  "money is split between them.") == SHARED
+        if not portfolio and count > bt.MAX_DETAILED:
+            sb.caption(f"With more than {bt.MAX_DETAILED} tickers each gets one quick backtest. "
+                       "Pick any of them afterwards for the full checks.")
+
     left, right = sb.columns(2)
     # without max_value Streamlit stops the picker 10 years after the default date
     start = left.date_input("Start date", pd.Timestamp(d["start"]).date(), min_value=date(1970, 1, 1),
@@ -109,12 +158,30 @@ def sidebar_inputs():
                                     step=0.01, format="%.2f", help="About 0.02 for FX, 0.1 for stocks."),
         **bt.QUICK_DEFAULTS,
     }
+    compare_sp500 = sb.checkbox("Compare to the S&P 500", value=False,
+                                help="Adds what the same money would have made in an S&P 500 fund "
+                                     f"({bt.SP500_FUND}, dividends reinvested) to the numbers and charts.")
 
-    split_date = None
+    split_date = max_weight_pct = None
     if advanced:
+        if portfolio:
+            if sb.radio("Split the money", [EQUAL, SPREAD],
+                        help="Equal slices: each ticker may use its share and the rest waits in cash. "
+                             "Spread: the money is shared by the tickers that have a position open, "
+                             "so more of it is at work when few signals are on.") == SPREAD:
+                max_weight_pct = sb.number_input("Most in one ticker (%)", min_value=1.0, max_value=100.0,
+                                                 value=float(d["max_weight_pct"]), step=5.0)
         settings["short_fee_pct"] = sb.number_input(
             "Borrow fee (% per year)", min_value=0.0, value=float(d["short_fee_pct"]), step=0.1,
             help="Paid on short positions. About 0 for FX, 0.5 for stocks.")
+        settings["carry_pct"] = sb.number_input(
+            "Carry (% per year)", value=float(d["carry_pct"]), step=0.25,
+            help="Interest for holding the position overnight: earned when long, paid when short. "
+                 "For a currency pair it is the first currency's interest rate minus the second's, "
+                 "so it can be negative. Leave at 0 for stocks.")
+        settings["cash_rate_pct"] = sb.number_input(
+            "Interest on cash (% per year)", min_value=0.0, value=float(d["cash_rate_pct"]), step=0.25,
+            help="Earned on money that is not invested. Sharpe then counts only the return above it.")
         settings["size_rule"] = sb.text_input(
             "Sizing rule", "", placeholder="SIZE BY RSI14 FROM 40 TO 20",
             help="Optional. How much to hold while the buy rule is active.")
@@ -128,10 +195,12 @@ def sidebar_inputs():
         settings["rebalance_pct"] = sb.number_input(
             "Rebalance band (%)", min_value=0.0, value=float(d["rebalance_pct"]), step=1.0,
             help="Only trade when the position is this far from its target.")
-        settings["stop_loss_pct"] = sb.number_input("Stop loss (%)", min_value=0.1, value=None,
-                                                    placeholder="off")
-        settings["take_profit_pct"] = sb.number_input("Take profit (%)", min_value=0.1, value=None,
-                                                      placeholder="off")
+        settings["stop_loss_pct"] = sb.number_input(
+            "Stop loss (%)", min_value=0.1, value=None, placeholder="off",
+            help="Closes the trade when it is this far below its opening price. Fills during the day.")
+        settings["take_profit_pct"] = sb.number_input(
+            "Take profit (%)", min_value=0.1, value=None, placeholder="off",
+            help="Closes the trade when it is this far above its opening price. Fills during the day.")
         if sb.checkbox("Train/test split", value=True,
                        help="Rules are judged separately before and after this date."):
             split_date = sb.date_input("Split date", pd.Timestamp(d["split_date"]).date(),
@@ -141,7 +210,9 @@ def sidebar_inputs():
         sb.caption("Quick mode uses 10,000 starting money, fully invested, no stops.")
 
     run = sb.button("Run backtest", type="primary", width="stretch")
-    return run, advanced, tickers, start, end, settings, split_date
+    return run, {"tickers": tickers, "universe": universe, "start": start, "end": end, "settings": settings,
+                 "split_date": split_date, "advanced": advanced, "portfolio": portfolio,
+                 "max_weight_pct": max_weight_pct, "compare_sp500": compare_sp500}
 
 
 def has_rule(text):
@@ -151,16 +222,17 @@ def has_rule(text):
         return True  # unreadable, which is reported as its own problem
 
 
-def check_inputs(tickers, start, end, settings, split_date):
+def check_inputs(raw):
     """Returns (cleaned inputs, list of problems to show the user)."""
     problems = []
-    tickers = bt.as_tickers(tickers)
+    start, end, split_date = raw["start"], raw["end"], raw["split_date"]
+    tickers = bt.universe(raw["universe"]) if raw["universe"] else bt.as_tickers(raw["tickers"])
     if not tickers:
         problems.append("**Tickers**: enter at least one ticker, e.g. `EURUSD=X` or `SPY`.")
     if start >= end:
         problems.append("**Dates**: the start date must be before the end date.")
 
-    settings = dict(settings)
+    settings = dict(raw["settings"])
     for key in RULE_LABELS:
         settings[key] = settings[key].strip()
     try:
@@ -188,42 +260,74 @@ def check_inputs(tickers, start, end, settings, split_date):
                         f"({end}). Move the split date, or untick *Train/test split* to use any start date.")
 
     iso = lambda day: day.isoformat() if day else None
-    return (tickers, iso(start), iso(end), settings, iso(split_date)), problems
+    return {**raw, "tickers": tickers, "start": iso(start), "end": iso(end), "settings": settings,
+            "split_date": iso(split_date), "portfolio": raw["portfolio"] and len(tickers) > 1}, problems
 
 
-def analyse(tickers, start, end, settings, split_date, advanced):
-    results, failed = {}, []
-    for ticker in tickers:
+def analyse(inputs, status=None):
+    # a study is one of three kinds. "tickers": a few tickers, each with every check. "scan": many
+    # tickers with one quick backtest each. "portfolio": all of them trading out of one account
+    start, end, settings = inputs["start"], inputs["end"], inputs["settings"]
+    study = {**inputs, "kind": "tickers", "results": {}, "details": {}, "fund": None}
+    try:
+        study["data"], study["failed"] = load_data(inputs["tickers"], start, end, status)
+    except Exception as e:
+        study["data"], study["failed"] = {}, [("Prices", str(e))]
+    data = study["data"]
+    if inputs["compare_sp500"] and data:
         try:
-            prices = load_prices(ticker, start, end)
-            results[ticker] = bt.analyse_ticker(prices, start, end, settings, split_date, advanced)
+            study["fund"] = load_data([bt.SP500_FUND], start, end)[0][bt.SP500_FUND]
+        except Exception:
+            study["failed"].append(("S&P 500 comparison", "no data found for " + bt.SP500_FUND))
+
+    if inputs["portfolio"] and len(data) > 1:
+        study["kind"] = "portfolio"
+        if status and len(data) > bt.MAX_DETAILED:
+            status("Trading the portfolio", 0, len(data))
+        try:
+            study["result"] = bt.analyse_portfolio(data, start, end, settings, inputs["split_date"],
+                                                   inputs["advanced"], inputs["max_weight_pct"], study["fund"])
         except Exception as e:
-            failed.append((ticker, str(e)))
-    return {"results": results, "failed": failed, "settings": settings, "split_date": split_date,
-            "advanced": advanced}
+            study["result"] = None
+            study["failed"].append(("Portfolio", str(e)))
+    elif len(data) > bt.MAX_DETAILED:
+        study["kind"] = "scan"
+        progress = (lambda done, total: status("Testing each ticker", done, total)) if status else None
+        study["table"], skipped = bt.scan_tickers(data, start, end, settings, progress)
+        study["failed"] += skipped
+    else:
+        for ticker, prices in data.items():
+            try:
+                study["results"][ticker] = bt.analyse_ticker(prices, start, end, settings, inputs["split_date"],
+                                                             inputs["advanced"], study["fund"])
+            except Exception as e:
+                study["failed"].append((ticker, str(e)))
+    return study
 
 
 @st.cache_data(show_spinner=False)
 def pendulum_study(end):
     d = bt.DEFAULT_STUDY
-    return analyse(d["tickers"], d["start"], end, dict(d["settings"]), d["split_date"], advanced=True)
+    return analyse({"tickers": d["tickers"], "universe": None, "start": d["start"], "end": end,
+                    "settings": dict(d["settings"]), "split_date": d["split_date"], "advanced": True,
+                    "portfolio": False, "max_weight_pct": None, "compare_sp500": False})
 
 
 def pct(x, digits=1):
     return f"{x:.{digits}f}%"
 
 
-def show_metrics(full):
+def show_metrics(r):
+    full = r["full"]
     s, b = full["metrics"], full["bh_metrics"]
-    rows = [("Total return", pct(s["total_return"]), pct(b["total_return"]),
-             f"{s['total_return'] - b['total_return']:+.1f} pts"),
-            ("Sharpe", f"{s['sharpe']:.2f}", f"{b['sharpe']:.2f}", f"{s['sharpe'] - b['sharpe']:+.2f}"),
-            ("Max drawdown", pct(s["max_drawdown"]), pct(b["max_drawdown"]),
-             f"{s['max_drawdown'] - b['max_drawdown']:+.1f} pts")]
-    for card, (label, value, bh_value, delta) in zip(st.columns(3), rows):
+    sp = r["sp500"]["metrics"] if r["sp500"] else None
+    held = "Holding them all" if r["portfolio"] else "Buy & hold"
+    rows = [("Total return", "total_return", pct, "{:+.1f} pts"), ("Sharpe", "sharpe", "{:.2f}".format, "{:+.2f}"),
+            ("Max drawdown", "max_drawdown", pct, "{:+.1f} pts")]
+    for card, (label, key, show, delta) in zip(st.columns(3), rows):
         with card.container(border=True):
-            st.metric(label, value, delta=delta)
-            st.caption(f"Buy & hold: {bh_value}")
+            st.metric(label, show(s[key]), delta=delta.format(s[key] - b[key]))
+            st.caption(f"{held}: {show(b[key])}" + (f"  \nS&P 500: {show(sp[key])}" if sp else ""))
 
 
 def show_verdict(r, settings):
@@ -238,6 +342,9 @@ def show_verdict(r, settings):
             notes.append("No trades in the test period")
     with st.container(border=True):
         st.markdown(f"**Verdict: {r['label']}**\n\n" + "\n".join(f"- {note}" for note in notes))
+    if r["data_notes"]:
+        more = f", and {len(r['data_notes']) - 4} more repairs" if len(r["data_notes"]) > 4 else ""
+        st.caption("Data: " + "; ".join(r["data_notes"][:4]) + more + ".")
 
 
 def show_figure(fig):
@@ -262,9 +369,9 @@ def trades_tab(full):
                         f"out {100 - st_['time_in_market']:.0f}%")
 
     table = trades.rename(columns={
-        "side": "Side", "entry_date": "Entry", "exit_date": "Exit", "days_held": "Days", "size": "Size",
-        "profit": "Profit", "return_pct": "Return %", "orders": "Orders", "exit_reason": "Exit reason",
-        "status": "Status"})
+        "ticker": "Ticker", "side": "Side", "entry_date": "Entry", "exit_date": "Exit", "days_held": "Days",
+        "size": "Size", "profit": "Profit", "return_pct": "Return %", "orders": "Orders",
+        "exit_reason": "Exit reason", "status": "Status"})
     st.dataframe(table, hide_index=True, width="stretch", height=380)
 
     closed = trades[trades["status"] == "closed"]
@@ -283,6 +390,8 @@ def trades_tab(full):
     yearly.index.name = "Year"
     right.caption("By year")
     right.dataframe(yearly, width="stretch")
+    if full["cash_interest"]:
+        st.caption(f"Interest earned on cash: {full['cash_interest']:,.2f}")
 
 
 def train_test_tab(r, split_date):
@@ -302,7 +411,25 @@ def train_test_tab(r, split_date):
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 
+def timing_and_costs(r):
+    # the two reruns that come with every backtest
+    full, free, late = r["full"]["metrics"], r["no_cost"]["metrics"], r["late"]["metrics"]
+    st.markdown("##### Costs and timing")
+    st.dataframe(pd.DataFrame({
+        "As tested": [pct(full["total_return"]), f"{full['sharpe']:.2f}"],
+        "Without costs": [pct(free["total_return"]), f"{free['sharpe']:.2f}"],
+        "Filled a day late": [pct(late["total_return"]), f"{late['sharpe']:.2f}"],
+    }, index=["Total return", "Sharpe"]), width="stretch")
+    st.caption("A result that needs free trading, or needs every order filled the moment the signal "
+               "appears, would not survive real trading.")
+
+
 def robustness_tab(ticker, r):
+    timing_and_costs(r)
+    if r["portfolio"]:
+        st.info("The random benchmark, the sensitivity check and the search for better numbers look at "
+                "one price series. To run them, test a ticker on its own.")
+        return
     if not r["advanced"]:
         st.info("Switch to advanced mode to compare the rules with random strategies, test nearby "
                 "settings and search for better numbers.")
@@ -364,26 +491,10 @@ def robustness_tab(ticker, r):
                      "yours. If the improvement disappears here, the search was just fitting the past.")
 
 
-def show_study(study):
-    st.divider()
-    st.header(study["title"])
-    for ticker, reason in study["failed"]:
-        st.error(f"**{ticker}** was skipped: {reason}. Check the ticker symbol on Yahoo Finance and the dates.")
-    results = study["results"]
-    if not results:
-        return
-
-    if len(results) > 1:
-        summary = pd.DataFrame([bt.summary_row(t, r) for t, r in results.items()]).dropna(axis=1, how="all")
-        st.dataframe(summary, hide_index=True, width="stretch")
-        ticker = st.radio("Show details for", list(results), horizontal=True)
-    else:
-        ticker = next(iter(results))
-    r = results[ticker]
+def show_ticker(ticker, r, study):
     full = r["full"]
-
     st.subheader(f"{ticker}, {full['start']} to {full['end']}")
-    show_metrics(full)
+    show_metrics(r)
     show_verdict(r, study["settings"])
 
     charts, trades, train_test, robustness = st.tabs(["Charts", "Trades", "Train vs test", "Robustness checks"])
@@ -395,6 +506,101 @@ def show_study(study):
         train_test_tab(r, study["split_date"])
     with robustness:
         robustness_tab(ticker, r)
+
+
+def show_portfolio(study):
+    r = study["result"]
+    if r is None:
+        return
+    full = r["full"]
+    how = (f"spread over open positions, at most {study['max_weight_pct']:g}% each" if study["max_weight_pct"]
+           else "an equal slice each")
+    st.subheader(f"Portfolio of {len(full['tickers'])} tickers, {full['start']} to {full['end']}")
+    st.caption(f"One account of {full['initial']:,.0f} trades every ticker with the same rules, {how}. It is "
+               f"compared with splitting the money equally over the same tickers and never selling.")
+    for ticker, reason in full["skipped"]:
+        st.caption(f"Left out {ticker}: {reason}.")
+    show_metrics(r)
+    show_verdict(r, study["settings"])
+
+    charts, by_ticker, trades, train_test, robustness = st.tabs(
+        ["Charts", "By ticker", "Trades", "Train vs test", "Robustness checks"])
+    with charts:
+        show_figure(bt.plot_portfolio(r, study["split_date"]))
+    with by_ticker:
+        st.caption("Where the money was made. Buy & hold profit is what simply holding that ticker's "
+                   "equal share of the money made.")
+        st.dataframe(full["per_ticker"], hide_index=True, width="stretch", height=420)
+    with trades:
+        trades_tab(full)
+    with train_test:
+        train_test_tab(r, study["split_date"])
+    with robustness:
+        robustness_tab("Portfolio", r)
+
+
+def show_scan(study):
+    table = study["table"]
+    if table.empty:
+        return
+    s = bt.scan_summary(table)
+    n = s["tickers"]
+    st.subheader(f"{n} tickers, each on its own, {table['From'].min()} to {study['end']}")
+    st.caption("Every ticker was tested separately with the full starting money. A rule with a real edge "
+               "should beat buy & hold on most of them, not on a lucky few.")
+    cards = [("Beat buy & hold", f"{s['beat_return']} of {n}", f"{s['beat_return'] / n:.0%} of tickers, by return"),
+             ("Better Sharpe", f"{s['beat_sharpe']} of {n}", f"{s['beat_sharpe'] / n:.0%} of tickers"),
+             ("Median return", pct(s["median_return"]), f"Buy & hold: {pct(s['median_bh'])}"),
+             ("Median Sharpe", f"{s['median_sharpe']:.2f}", f"Buy & hold: {s['median_bh_sharpe']:.2f}")]
+    for card, (label, value, note) in zip(st.columns(4), cards):
+        with card.container(border=True):
+            st.metric(label, value)
+            st.caption(note)
+    if s["no_trades"]:
+        st.caption(f"The rules never traded on {s['no_trades']} of the tickers.")
+
+    overview, everything, detail = st.tabs(["Overview", "All tickers", "One ticker in detail"])
+    with overview:
+        show_figure(bt.plot_scan(table))
+    with everything:
+        st.caption("Click a column to sort. Difference is the rule's return minus buy & hold's, in points.")
+        st.dataframe(table.sort_values("Difference", ascending=False), hide_index=True, width="stretch",
+                     height=520)
+    with detail:
+        ticker = st.selectbox("Ticker", sorted(table["Ticker"]), index=None,
+                              placeholder="Pick a ticker to run every check on it")
+        if ticker:
+            if ticker not in study["details"]:
+                with st.spinner(f"Running the checks on {ticker}...", show_time=True):
+                    study["details"][ticker] = bt.analyse_ticker(
+                        study["data"][ticker], study["start"], study["end"], study["settings"],
+                        study["split_date"], study["advanced"], study["fund"])
+            show_ticker(ticker, study["details"][ticker], study)
+
+
+def show_study(study):
+    st.divider()
+    st.header(study["title"])
+    for ticker, reason in study["failed"][:10]:
+        st.error(f"**{ticker}** was skipped: {reason}. Check the ticker symbol on Yahoo Finance and the dates.")
+    if len(study["failed"]) > 10:
+        st.error(f"{len(study['failed']) - 10} more tickers were skipped.")
+    if study["universe"] == "SP500":
+        st.warning(SURVIVORS)
+
+    if study["kind"] == "portfolio":
+        show_portfolio(study)
+    elif study["kind"] == "scan":
+        show_scan(study)
+    elif study["results"]:
+        results = study["results"]
+        if len(results) > 1:
+            summary = pd.DataFrame([bt.summary_row(t, r) for t, r in results.items()]).dropna(axis=1, how="all")
+            st.dataframe(summary, hide_index=True, width="stretch")
+            ticker = st.radio("Show details for", list(results), horizontal=True)
+        else:
+            ticker = next(iter(results))
+        show_ticker(ticker, results[ticker], study)
 
 
 def pendulum_card():
@@ -431,25 +637,46 @@ def scroll_to_results():
 def running(message):
     # the results sit below the study card, so bring that spot into view straight away: the spinner
     # then shows where the results will appear, and a second one sits under the sidebar's Run button.
-    # The skeleton below the spinner shows the shape of what is coming
+    # The skeleton below the spinner shows the shape of what is coming. Long runs report how far
+    # they are through the function this yields
     with ExitStack() as spinners:
         with st.sidebar:
             spinners.enter_context(st.spinner("Running...", show_time=True))
         spinners.enter_context(st.spinner(message, show_time=True))
+        progress = st.empty()
         skeleton = st.empty()
         skeleton.html(SKELETON)
         spinners.callback(skeleton.empty)
+        spinners.callback(progress.empty)
         scroll_to_results()
-        yield
+
+        def status(text, done, total):
+            progress.progress(min(done / max(total, 1), 1.0),
+                              text=f"{text}: {done} of {total}" if done else f"{text}...")
+        yield status
+
+
+def run_message(inputs):
+    count = len(inputs["tickers"])
+    if count > bt.DOWNLOAD_CHUNK:
+        return f"Loading and testing {count} tickers. This takes a few minutes..."
+    if inputs["portfolio"]:
+        return f"Running the portfolio of {count} tickers..."
+    if count > bt.MAX_DETAILED:
+        return f"Testing {count} tickers..."
+    if inputs["advanced"]:
+        return "Running the backtest and the robustness checks. This can take a minute..."
+    return "Running the backtest..."
 
 
 def main():
     st.markdown(STYLE, unsafe_allow_html=True)
     st.title("Backtester")
-    st.write("Write trading rules as text and test them on any ticker from Yahoo Finance. "
-             "Run my default study below, or use the sidebar on the left to test your own rules.")
+    st.write("Write trading rules as text and test them on any ticker from Yahoo Finance, on a whole list "
+             "of them, or as one portfolio. Run my default study below, or use the sidebar on the left "
+             "to test your own rules.")
 
-    run_custom, advanced, tickers, start, end, settings, split_date = sidebar_inputs()
+    run_custom, raw_inputs = sidebar_inputs()
     run_default = pendulum_card()
     with st.expander("How to write rules"):
         st.markdown(GUIDE)
@@ -464,13 +691,12 @@ def main():
             pendulum_study.clear()  # e.g. Yahoo was unreachable: try again next time
         st.session_state["study"] = {**study, "title": "Pendulum study"}
     elif run_custom:
-        inputs, problems = check_inputs(tickers, start, end, settings, split_date)
+        inputs, problems = check_inputs(raw_inputs)
         st.session_state["problems"] = problems
         st.session_state.pop("study", None)
         if not problems:
-            with running("Running the backtest and the robustness checks. This can take a minute..."
-                         if advanced else "Running the backtest..."):
-                st.session_state["study"] = {**analyse(*inputs, advanced), "title": "Your backtest"}
+            with running(run_message(inputs)) as status:
+                st.session_state["study"] = {**analyse(inputs, status), "title": "Your backtest"}
 
     for problem in st.session_state.get("problems", []):
         st.error(problem)
@@ -478,7 +704,7 @@ def main():
         show_study(st.session_state["study"])
     if run_default or run_custom:
         scroll_to_results()  # again once the results are drawn, in case the page moved
-    st.caption("Daily data only. Not financial advice.")
+    st.caption(f"Backtester v{bt.__version__}. Daily data from Yahoo Finance. Not financial advice.")
 
 
 main()
