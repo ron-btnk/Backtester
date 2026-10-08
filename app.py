@@ -134,16 +134,24 @@ def load_data(tickers, start, end, status=None):
     return data, failed
 
 
+YEAR_TIP = ("To jump to another year, click the year in the box and type it. The calendar's own year "
+            "list only reaches 10 years each way.")
+
+
 def sidebar_inputs():
+    # the sidebar reads top to bottom as the steps of a backtest. Advanced mode adds a fourth group
+    # of settings, folded away so the Run button stays in reach
     d = bt.CUSTOM_DEFAULTS
     sb = st.sidebar
     sb.header("Your backtest")
     advanced = sb.radio("Mode", ["Quick", "Advanced"], horizontal=True,
-                        help="Advanced adds a train/test split, a random benchmark, a sensitivity "
-                             "check and a search for better numbers. It takes longer.") == "Advanced"
+                        help="Quick asks for the essentials. Advanced adds every setting, a train/test "
+                             "split, a random benchmark, a sensitivity check and a search for better "
+                             "numbers. It takes longer.") == "Advanced"
 
+    sb.markdown("##### 1. What to test")
     lists = {label: key for key, label in bt.UNIVERSES.items()}
-    choice = sb.selectbox("What to test", [OWN_TICKERS, *lists],
+    choice = sb.selectbox("Tickers from", [OWN_TICKERS, *lists],
                           help="Your own tickers, or a ready-made list to see whether a rule works "
                                "across a whole market and not just on one ticker.")
     universe = lists.get(choice)
@@ -156,94 +164,105 @@ def sidebar_inputs():
     else:
         count = len(bt.universe(universe))
         if universe == "SP500":
-            sb.caption(f"{count} stocks. Loading and testing them takes a few minutes, and is quicker "
-                       "when you run the app on your own computer.")
+            sb.caption(f"{count} stocks. Loading and testing them takes a few minutes. It is best run on "
+                       "your own computer, see the README.")
 
     # always on show, so it is clear that your own tickers can be run as a portfolio too
-    portfolio = sb.radio("Money", [SEPARATE, SHARED],
+    portfolio = sb.radio("With several tickers", [SEPARATE, SHARED],
                          help="On its own: every ticker gets the full starting money and its own "
                               "result. Shared: one account trades all of them, so the starting "
                               "money is split between them. A portfolio needs two or more tickers.") == SHARED
     if not portfolio and count > bt.MAX_DETAILED:
         sb.caption(f"With more than {bt.MAX_DETAILED} tickers each gets one quick backtest. "
                    "Pick any of them afterwards for the full checks.")
+    if portfolio and not advanced:
+        sb.caption("The app decides how much each ticker gets, from how the rule has done on it so far. "
+                   "Advanced mode has other ways to split the money.")
 
     left, right = sb.columns(2)
     # without max_value Streamlit stops the picker 10 years after the default date
-    start = left.date_input("Start date", pd.Timestamp(d["start"]).date(), min_value=date(1970, 1, 1),
-                            max_value=date.today())
-    end = right.date_input("End date", date.today(), min_value=date(1970, 1, 1))
-    # Streamlit's calendar only lists the years within 10 of the one it shows, so 2005 to 2026 takes three hops
-    sb.caption("To jump to another year, click the year in the box and type it. The calendar's own "
-               "year list only reaches 10 years each way.")
+    start = left.date_input("From", pd.Timestamp(d["start"]).date(), min_value=date(1970, 1, 1),
+                            max_value=date.today(), help=YEAR_TIP)
+    end = right.date_input("To", date.today(), min_value=date(1970, 1, 1), help=YEAR_TIP)
 
+    sb.markdown("##### 2. The rules")
     settings = {
-        "buy_rule": sb.text_input("Buy rule", d["buy_rule"]),
-        "sell_rule": sb.text_input("Sell rule", d["sell_rule"]),
-        "short_rule": sb.text_input("Short rule", d["short_rule"], help="Optional. Leave blank for long-only."),
+        "buy_rule": sb.text_input("Buy rule", d["buy_rule"], help="When to open a long position."),
+        "sell_rule": sb.text_input("Sell rule", d["sell_rule"], help="When to close it."),
+        "short_rule": sb.text_input("Short rule", d["short_rule"],
+                                    help="Optional: when to bet on a fall. Leave blank for long-only."),
         "cover_rule": sb.text_input("Cover rule", d["cover_rule"],
-                                    help="Leave blank to use the opposite of the short rule."),
-        "cost_pct": sb.number_input("Cost per trade (%)", min_value=0.0, value=float(d["cost_pct"]),
-                                    step=0.01, format="%.2f", help="About 0.02 for FX, 0.1 for stocks."),
+                                    help="When to close the short. Leave blank to use the opposite of the short rule."),
         **bt.QUICK_DEFAULTS,
     }
+    sb.caption("How to write rules is explained on the right.")
+
+    sb.markdown("##### 3. Costs and comparison")
+    settings["cost_pct"] = sb.number_input("Cost per trade (%)", min_value=0.0, value=float(d["cost_pct"]),
+                                           step=0.01, format="%.2f", help="About 0.02 for FX, 0.1 for stocks.")
     compare_sp500 = sb.checkbox("Compare to the S&P 500", value=False,
                                 help="Adds what the same money would have made in an S&P 500 fund "
                                      f"({bt.SP500_FUND}, dividends reinvested) to the numbers and charts.")
 
     split_date = max_weight_pct = None
     allocation = "smart"
-    if portfolio and not advanced:
-        sb.caption("The app decides how much each ticker gets, from how the rule has done on it so far. "
-                   "Advanced mode has other ways to split the money.")
     if advanced:
+        sb.markdown("##### 4. More settings")
         if portfolio:
-            allocation = SPLITS[sb.radio(
-                "Split the money", list(SPLITS),
-                help="Decided by the app: more to the tickers where the rule's earlier signals paid off "
-                     "more often, less to positions that move together. Equal slices: every ticker may "
-                     "use the same share and the rest waits in cash. Spread: shared equally by the "
-                     "tickers that have a position open.")]
-            if allocation != "equal":
-                max_weight_pct = sb.number_input(
-                    "Most in one ticker (%)", min_value=1.0, max_value=100.0, step=5.0,
-                    value=float(d["max_weight_pct"]) if allocation == "spread" else None, placeholder="automatic",
-                    help="Left empty, no ticker gets more than twice an equal slice.")
-        settings["short_fee_pct"] = sb.number_input(
-            "Borrow fee (% per year)", min_value=0.0, value=float(d["short_fee_pct"]), step=0.1,
-            help="Paid on short positions. About 0 for FX, 0.5 for stocks.")
-        settings["carry_pct"] = sb.number_input(
-            "Carry (% per year)", value=float(d["carry_pct"]), step=0.25,
-            help="Interest for holding the position overnight: earned when long, paid when short. "
-                 "For a currency pair it is the first currency's interest rate minus the second's, "
-                 "so it can be negative. Leave at 0 for stocks.")
-        settings["cash_rate_pct"] = sb.number_input(
-            "Interest on cash (% per year)", min_value=0.0, value=float(d["cash_rate_pct"]), step=0.25,
-            help="Earned on money that is not invested. Sharpe then counts only the return above it.")
-        settings["size_rule"] = sb.text_input(
-            "Sizing rule", "", placeholder="SIZE BY RSI14 FROM 40 TO 20",
-            help="Optional. How much to hold while the buy rule is active.")
-        settings["initial"] = sb.number_input("Starting money", min_value=1.0, value=float(d["initial"]),
-                                              step=1000.0, format="%.0f")
-        settings["position_pct"] = sb.number_input("Max invested (%)", min_value=1.0, max_value=100.0,
-                                                   value=float(d["position_pct"]), step=5.0)
-        settings["target_vol_pct"] = sb.number_input(
-            "Target volatility (%)", min_value=0.1, value=None, placeholder="off",
-            help="Hold less when the asset is jumpy. E.g. 15.")
-        settings["rebalance_pct"] = sb.number_input(
-            "Rebalance band (%)", min_value=0.0, value=float(d["rebalance_pct"]), step=1.0,
-            help="Only trade when the position is this far from its target.")
-        settings["stop_loss_pct"] = sb.number_input(
-            "Stop loss (%)", min_value=0.1, value=None, placeholder="off",
-            help="Closes the trade when it is this far below its opening price. Fills during the day.")
-        settings["take_profit_pct"] = sb.number_input(
-            "Take profit (%)", min_value=0.1, value=None, placeholder="off",
-            help="Closes the trade when it is this far above its opening price. Fills during the day.")
-        if sb.checkbox("Train/test split", value=True,
-                       help="Rules are judged separately before and after this date."):
-            split_date = sb.date_input("Split date", pd.Timestamp(d["split_date"]).date(),
-                                       min_value=date(1970, 1, 1), max_value=date.today(),
-                                       help="Must be after the start date and before the end date.")
+            with sb.expander("How the portfolio splits its money", expanded=True):
+                allocation = SPLITS[st.radio(
+                    "Split the money", list(SPLITS),
+                    help="Decided by the app: more to the tickers where the rule's earlier signals paid off "
+                         "more often, less to positions that move together. Equal slices: every ticker may "
+                         "use the same share and the rest waits in cash. Spread: shared equally by the "
+                         "tickers that have a position open.")]
+                if allocation != "equal":
+                    max_weight_pct = st.number_input(
+                        "Most in one ticker (%)", min_value=1.0, max_value=100.0, step=5.0,
+                        value=float(d["max_weight_pct"]) if allocation == "spread" else None,
+                        placeholder="automatic", help="Left empty, no ticker gets more than twice an equal slice.")
+        with sb.expander("Train/test split", expanded=True):
+            if st.checkbox("Judge the rules on two periods", value=True,
+                           help="Rules are judged separately before and after the split date. A rule that "
+                                "only works before it was probably fitted to the past."):
+                split_date = st.date_input("Split date", pd.Timestamp(d["split_date"]).date(),
+                                           min_value=date(1970, 1, 1), max_value=date.today(),
+                                           help="Must be after the start date and before the end date. " + YEAR_TIP)
+        with sb.expander("Money and position size"):
+            settings["initial"] = st.number_input("Starting money", min_value=1.0, value=float(d["initial"]),
+                                                  step=1000.0, format="%.0f")
+            settings["position_pct"] = st.number_input(
+                "Max invested (%)", min_value=1.0, max_value=100.0, value=float(d["position_pct"]), step=5.0,
+                help="The most of the money a position may use.")
+            settings["size_rule"] = st.text_input(
+                "Sizing rule", "", placeholder="SIZE BY RSI14 FROM 40 TO 20",
+                help="Optional. How much to hold while the buy rule is active: 0% at the first number, "
+                     "100% at the second.")
+            settings["target_vol_pct"] = st.number_input(
+                "Target volatility (%)", min_value=0.1, value=None, placeholder="off",
+                help="Hold less when the asset is jumpy. E.g. 15.")
+            settings["rebalance_pct"] = st.number_input(
+                "Rebalance band (%)", min_value=0.0, value=float(d["rebalance_pct"]), step=1.0,
+                help="Only trade when the position is this far from its target.")
+        with sb.expander("Stop loss and take profit"):
+            settings["stop_loss_pct"] = st.number_input(
+                "Stop loss (%)", min_value=0.1, value=None, placeholder="off",
+                help="Closes the trade when it is this far below its opening price. Fills during the day.")
+            settings["take_profit_pct"] = st.number_input(
+                "Take profit (%)", min_value=0.1, value=None, placeholder="off",
+                help="Closes the trade when it is this far above its opening price. Fills during the day.")
+        with sb.expander("Interest and fees"):
+            settings["short_fee_pct"] = st.number_input(
+                "Borrow fee (% per year)", min_value=0.0, value=float(d["short_fee_pct"]), step=0.1,
+                help="Paid on short positions. About 0 for FX, 0.5 for stocks.")
+            settings["carry_pct"] = st.number_input(
+                "Carry (% per year)", value=float(d["carry_pct"]), step=0.25,
+                help="Interest for holding the position overnight: earned when long, paid when short. "
+                     "For a currency pair it is the first currency's interest rate minus the second's, "
+                     "so it can be negative. Leave at 0 for stocks.")
+            settings["cash_rate_pct"] = st.number_input(
+                "Interest on cash (% per year)", min_value=0.0, value=float(d["cash_rate_pct"]), step=0.25,
+                help="Earned on money that is not invested. Sharpe then counts only the return above it.")
     else:
         sb.caption("Quick mode uses 10,000 starting money, fully invested, no stops.")
 
@@ -268,7 +287,7 @@ def check_inputs(raw):
     if not tickers:
         problems.append("**Tickers**: enter at least one ticker, e.g. `EURUSD=X` or `SPY`.")
     if raw["portfolio"] and len(tickers) == 1:
-        problems.append(f"**Money**: a portfolio needs at least two tickers. Add more after `{tickers[0]}`, "
+        problems.append(f"**Portfolio**: a portfolio needs at least two tickers. Add more after `{tickers[0]}`, "
                         f"separated by commas, or choose *{SEPARATE}*.")
     if start >= end:
         problems.append("**Dates**: the start date must be before the end date.")
@@ -364,26 +383,35 @@ def show_metrics(r):
     s, b = full["metrics"], full["bh_metrics"]
     sp = r["sp500"]["metrics"] if r["sp500"] else None
     held = "Holding them all" if r["portfolio"] else "Buy & hold"
-    rows = [("Total return", "total_return", pct, "{:+.1f} pts"), ("Sharpe", "sharpe", "{:.2f}".format, "{:+.2f}"),
-            ("Max drawdown", "max_drawdown", pct, "{:+.1f} pts")]
-    for card, (label, key, show, delta) in zip(st.columns(3), rows):
+    rows = [("Total return", "total_return", pct, "{:+.1f} pts", "What the starting money gained or lost."),
+            ("Sharpe", "sharpe", "{:.2f}".format, "{:+.2f}",
+             "Return per unit of risk, per year. Above 1 is very good, around 0 is nothing."),
+            ("Max drawdown", "max_drawdown", pct, "{:+.1f} pts", "The worst fall from a peak along the way.")]
+    for card, (label, key, show, delta, meaning) in zip(st.columns(3), rows):
         with card.container(border=True):
-            st.metric(label, show(s[key]), delta=delta.format(s[key] - b[key]))
+            st.metric(label, show(s[key]), delta=delta.format(s[key] - b[key]) + f" vs {held.lower()}", help=meaning)
             st.caption(f"{held}: {show(b[key])}" + (f"  \nS&P 500: {show(sp[key])}" if sp else ""))
+
+
+VERDICTS = {"promising": "it passed most of the checks", "mixed": "it passed some checks and failed others",
+            "doesn't hold up": "it failed most of the checks"}
+MARKS = {"+": ":green[**✓**]", "-": ":red[**✗**]", "": ":gray[–]"}
 
 
 def show_verdict(r, settings):
     trades = r["full"]["trades"]
-    notes = list(r["notes"])
+    notes = list(zip(r["marks"], r["notes"]))
     if trades.empty:
-        notes.insert(0, "No trades: the rules never opened a position")
+        notes.insert(0, ("-", "No trades: the rules never opened a position"))
     else:
         if bt.shorting_on(settings) and not (trades["side"] == "short").any():
-            notes.append("The short rule never triggered")
+            notes.append(("", "The short rule never triggered"))
         if r["test"] is not None and r["test"]["trades"].empty:
-            notes.append("No trades in the test period")
+            notes.append(("-", "No trades in the test period"))
     with st.container(border=True):
-        st.markdown(f"**Verdict: {r['label']}**\n\n" + "\n".join(f"- {note}" for note in notes))
+        st.markdown(f"**Verdict: {r['label']}**, {VERDICTS[r['label']]}")
+        st.markdown("  \n".join(f"{MARKS[mark]} {note}" for mark, note in notes))
+        st.caption("✓ speaks for the rules, ✗ against, – is information. The tabs below show the detail.")
     if r["data_notes"]:
         more = f", and {len(r['data_notes']) - 4} more repairs" if len(r["data_notes"]) > 4 else ""
         st.caption("Data: " + "; ".join(r["data_notes"][:4]) + more + ".")
@@ -691,22 +719,24 @@ def show_study(study):
 def pendulum_card():
     d = bt.DEFAULT_STUDY
     with st.container(border=True):
-        st.subheader("Does EUR/USD move like a pendulum?")
-        st.write("My default study. The 60-day average is the bottom of the swing and price is the pendulum. "
-                 "Rules were set on 2005-2015 and tested on 2016 onwards.")
-        st.caption("Equation of motion, for small swings")
-        st.latex(r"\frac{d^2\theta}{dt^2} = -\omega^2\,\theta")
-        st.caption(r"Its energy ½v² + ½ω²θ² tells you how far the swing will go")
-        st.latex(r"\text{amplitude} = \sqrt{\theta^2 + \frac{v^2}{\omega^2}}")
-        st.markdown(
-            "- **θ**: how far price is from its 60-day average, in standard deviations\n"
-            "- **v**: how much θ changed since yesterday\n"
-            "- **ω²**: 0.01, how strongly price is pulled back (a swing of about 63 days)\n\n"
-            "Markets aren't a perfect pendulum, so friction lets the swing keep only 80% of that, and news "
-            "can knock it off course completely.\n\n"
-            "Buy when a swing bottoms out below -1.5 and sell when it reaches 80% of the predicted "
-            "amplitude on the other side. If price runs past 3 standard deviations, the average has "
-            "probably moved, so get out. Shorts are the mirror image.")
+        st.subheader("Example: does EUR/USD move like a pendulum?")
+        st.write("My own study, ready to run. The 60-day average is the bottom of the swing and the price is "
+                 "the pendulum: buy when a swing bottoms out, sell when it reaches the other side. The rules "
+                 "were set on 2005-2015 and tested on 2016 onwards.")
+        with st.expander("The idea and the maths"):
+            st.caption("Equation of motion, for small swings")
+            st.latex(r"\frac{d^2\theta}{dt^2} = -\omega^2\,\theta")
+            st.caption(r"Its energy ½v² + ½ω²θ² tells you how far the swing will go")
+            st.latex(r"\text{amplitude} = \sqrt{\theta^2 + \frac{v^2}{\omega^2}}")
+            st.markdown(
+                "- **θ**: how far price is from its 60-day average, in standard deviations\n"
+                "- **v**: how much θ changed since yesterday\n"
+                "- **ω²**: 0.01, how strongly price is pulled back (a swing of about 63 days)\n\n"
+                "Markets aren't a perfect pendulum, so friction lets the swing keep only 80% of that, and news "
+                "can knock it off course completely.\n\n"
+                "Buy when a swing bottoms out below -1.5 and sell when it reaches 80% of the predicted "
+                "amplitude on the other side. If price runs past 3 standard deviations, the average has "
+                "probably moved, so get out. Shorts are the mirror image.")
         with st.expander("The rules, written out in full"):
             st.code("\n".join(d["settings"][key] for _, key in bt.RULE_SIDES), language=None, wrap_lines=True)
         return st.button("Run the pendulum study", type="primary")
@@ -757,14 +787,20 @@ def run_message(inputs):
 def main():
     st.markdown(STYLE, unsafe_allow_html=True)
     st.title("Backtester")
-    st.write("Write trading rules as text and test them on any ticker from Yahoo Finance, on a whole list "
-             "of them, or as one portfolio. Run my default study below, or use the sidebar on the left "
-             "to test your own rules.")
+    st.write("Test a trading rule on past prices and find out whether it had an edge or was just lucky.")
+    steps = [("1. Pick what to test", "One ticker, several, or a whole list such as the S&P 500 stocks."),
+             ("2. Write the rules", "Plain text, for example `BUY IF PRICE > MA200`."),
+             ("3. Run it", "You get the result next to buy and hold, and a verdict from a set of checks.")]
+    for column, (title, text) in zip(st.columns(3), steps):
+        with column.container(border=True):
+            st.markdown(f"**{title}**")
+            st.caption(text)
+    st.caption("All three steps are in the sidebar on the left. Or try the example below first.")
 
     run_custom, raw_inputs = sidebar_inputs()
-    run_default = pendulum_card()
     with st.expander("How to write rules"):
         st.markdown(GUIDE)
+    run_default = pendulum_card()
 
     # the margin keeps the spot clear of Streamlit's top bar when it is scrolled into view
     st.html('<div id="results" style="scroll-margin-top: 4.5rem"></div>')

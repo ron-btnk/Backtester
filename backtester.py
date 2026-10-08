@@ -1411,13 +1411,14 @@ def compare_sp500(full, fund, settings):
 
 
 def _finish(full, no_cost, late, train, test, random, sens, variants, advanced, settings, sp500_fund):
-    label, notes = verdict(full, no_cost, train, test, random, sens, late)
+    label, notes, marks = verdict(full, no_cost, train, test, random, sens, late)
     sp500 = compare_sp500(full, sp500_fund, settings) if sp500_fund is not None else None
     if sp500:
         ours, theirs = full["metrics"]["total_return"], sp500["metrics"]["total_return"]
         notes.append(f"{'Beat' if ours > theirs else 'Lost to'} the S&P 500 ({ours:.1f}% vs {theirs:.1f}%)")
+        marks.append("+" if ours > theirs else "-")
     return {"full": full, "no_cost": no_cost, "late": late, "train": train, "test": test, "random": random,
-            "sens": sens, "variants": variants, "label": label, "notes": notes, "advanced": advanced,
+            "sens": sens, "variants": variants, "label": label, "notes": notes, "marks": marks, "advanced": advanced,
             "sp500": sp500, "portfolio": "tickers" in full}
 
 
@@ -1464,6 +1465,7 @@ def analyse_portfolio(data, start, end, settings, split_date=None, advanced=True
         r["notes"].append(f"Its way of splitting the money made {ours['total_return']:.1f}% (Sharpe "
                           f"{ours['sharpe']:.2f}). Equal slices made {theirs['total_return']:.1f}% "
                           f"(Sharpe {theirs['sharpe']:.2f})")
+        r["marks"].append("+" if ours["sharpe"] > theirs["sharpe"] else "-")
     r["data_notes"] = [f"{t}: {note}" for t in full["tickers"] for note in data_notes(data[t])
                        if note.startswith("Removed")]
     return r
@@ -1509,74 +1511,79 @@ def scan_summary(table):
 def verdict(full, no_cost=None, train=None, test=None, random=None, sens=None, late=None):
     # every check adds or removes points, and the checks that are hardest to pass by luck count double
     s, b, st = full["metrics"], full["bh_metrics"], full["stats"]
-    notes, score = [], 0
+    notes, marks, score = [], [], 0
+
+    def say(note, mark=""):  # mark: "+" speaks for the rules, "-" against, "" is just information
+        notes.append(note)
+        marks.append(mark)
 
     if st["trades"] < 10:
-        notes.append(f"Only {st['trades']} trades, too few to judge")
+        say(f"Only {st['trades']} trades, too few to judge", "-")
         score -= 1
 
     if s["total_return"] > b["total_return"]:
-        notes.append(f"Beat buy & hold ({s['total_return']:.1f}% vs {b['total_return']:.1f}%)")
+        say(f"Beat buy & hold ({s['total_return']:.1f}% vs {b['total_return']:.1f}%)", "+")
         score += 1
     else:
-        notes.append(f"Lost to buy & hold ({s['total_return']:.1f}% vs {b['total_return']:.1f}%)")
+        say(f"Lost to buy & hold ({s['total_return']:.1f}% vs {b['total_return']:.1f}%)", "-")
         score -= 1
 
     if s["sharpe"] > b["sharpe"]:
-        notes.append(f"Better Sharpe ({s['sharpe']:.2f} vs {b['sharpe']:.2f})")
+        say(f"Better Sharpe ({s['sharpe']:.2f} vs {b['sharpe']:.2f})", "+")
         score += 1
     else:
-        notes.append(f"Worse Sharpe ({s['sharpe']:.2f} vs {b['sharpe']:.2f})")
+        say(f"Worse Sharpe ({s['sharpe']:.2f} vs {b['sharpe']:.2f})", "-")
         score -= 1
 
     if st["trades"] and s["total_return"] <= 0:
         # losing less than a falling market is not an edge
-        notes.append(f"Lost money ({s['total_return']:.1f}%)")
+        say(f"Lost money ({s['total_return']:.1f}%)", "-")
         score -= 2
 
     if s["max_drawdown"] > b["max_drawdown"]:
-        notes.append(f"Smaller max drawdown ({s['max_drawdown']:.1f}% vs {b['max_drawdown']:.1f}%)")
+        say(f"Smaller max drawdown ({s['max_drawdown']:.1f}% vs {b['max_drawdown']:.1f}%)", "+")
         score += 1
 
     if st["avg_invested"] < 50:
-        notes.append(f"Only {st['avg_invested']:.0f}% invested on average")
+        say(f"Only {st['avg_invested']:.0f}% invested on average")
 
     if no_cost is not None:
         eaten = no_cost["metrics"]["total_return"] - s["total_return"]
-        notes.append(f"Costs took {eaten:.1f} points of return")
+        say(f"Costs took {eaten:.1f} points of return")
         if no_cost["metrics"]["total_return"] > b["total_return"] >= s["total_return"]:
-            notes.append("Only beats buy & hold before costs")
+            say("Only beats buy & hold before costs", "-")
             score -= 1
 
     if late is not None and st["trades"]:
-        notes.append(f"Filled a day late it makes {late['metrics']['total_return']:.1f}% instead of "
+        say(f"Filled a day late it makes {late['metrics']['total_return']:.1f}% instead of "
                      f"{s['total_return']:.1f}%")
         if s["total_return"] > b["total_return"] >= late["metrics"]["total_return"]:
-            notes.append("Only beats buy & hold when every order is filled straight away")
+            say("Only beats buy & hold when every order is filled straight away", "-")
             score -= 1
 
     if st["top_trade_share"] > 50:
-        notes.append(f"One trade made {st['top_trade_share']:.0f}% of the profit")
+        say(f"One trade made {st['top_trade_share']:.0f}% of the profit", "-")
         score -= 1
 
     if train is not None and test is not None:
         tr_beat = train["metrics"]["total_return"] > train["bh_metrics"]["total_return"]
         te_beat = test["metrics"]["total_return"] > test["bh_metrics"]["total_return"]
         if tr_beat and te_beat:
-            notes.append("Beat buy & hold in both the train and test period")
+            say("Beat buy & hold in both the train and test period", "+")
             score += 2
         elif tr_beat:
-            notes.append("Worked in the train period, failed in the test period")
+            say("Worked in the train period, failed in the test period", "-")
             score -= 2
         elif te_beat:
-            notes.append("Failed in the train period, worked in the test period")
+            say("Failed in the train period, worked in the test period")
         else:
-            notes.append("Lost to buy & hold in both periods")
+            say("Lost to buy & hold in both periods", "-")
             score -= 1
 
     if random is not None:
         beaten = random["sharpe_beaten_pct"]
-        notes.append(f"Beat {beaten:.0f}% of {random['runs']} random strategies")
+        say(f"Beat {beaten:.0f}% of {random['runs']} random strategies",
+            "+" if beaten >= 95 else "-" if beaten < 75 else "")
         if beaten >= 95:
             score += 2
         elif beaten < 50:
@@ -1586,7 +1593,8 @@ def verdict(full, no_cost=None, train=None, test=None, random=None, sens=None, l
 
     if sens is not None and sens["tested"]:
         stable = sens["stable_pct"]
-        notes.append(f"{stable:.0f}% of {sens['tested']} nearby settings beat buy & hold")
+        say(f"{stable:.0f}% of {sens['tested']} nearby settings beat buy & hold",
+            "+" if stable >= 70 else "-" if stable < 40 else "")
         if stable >= 70:
             score += 1
         elif sens["original_sharpe"] > sens["bh_sharpe"] and stable < 40:
@@ -1598,7 +1606,7 @@ def verdict(full, no_cost=None, train=None, test=None, random=None, sens=None, l
         label = "mixed"
     else:
         label = "doesn't hold up"
-    return label, notes
+    return label, notes, marks
 
 
 # ---- Printed output ----
@@ -1863,8 +1871,9 @@ def print_improvement(v):
 
 def print_verdict(r):
     print(f"\nVerdict: {r['label']}")
-    for note in r["notes"]:
-        print(f"  {note}")
+    for note, mark in zip(r["notes"], r["marks"]):
+        print(f"  {mark or ' '} {note}")
+    print("  (+ speaks for the rules, - against)")
 
 
 def summary_row(ticker, r):
@@ -1901,7 +1910,7 @@ def _plot_value(ax, r, bh_label="Buy & hold"):
     if r["sp500"]:
         ax.plot(r["sp500"]["values"].index, r["sp500"]["values"].values, **SP500_STYLE)
     ax.set_title("Account value")
-    ax.legend(loc="upper left")
+    ax.legend(loc="best")
 
 
 def _plot_drawdown(ax, r, bh_label="Buy & hold"):
@@ -1991,7 +2000,7 @@ def plot_results(ticker, r, split_date=None, compact=False):
                          label="Close position")
     title = "green = long, red = short" if has_shorts else "green = invested"
     price_ax.set_title(f"{ticker}: price ({title})")
-    price_ax.legend(loc="upper left")
+    price_ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.02), ncol=6, frameon=False)  # under the chart, off the data
 
     _plot_value(equity_ax, r)
 
