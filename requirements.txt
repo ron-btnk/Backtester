@@ -1,6 +1,6 @@
-yfinance
-pandas
-numpy
-matplotlib
-jupyter
-streamlit
+# what the app needs; tested with Python 3.13. For the notebook also: pip install notebook
+streamlit==1.65.0
+pandas==3.0.6
+numpy==2.5.3
+matplotlib==3.11.2
+yfinance==1.7.0
