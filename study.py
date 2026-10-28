@@ -25,7 +25,7 @@ TREND = {
     **bt.QUICK_DEFAULTS,
 }
 
-# (name, result) for the 8 ideas, all designed on 2005-2015. Only the 200-day rule and the pendulum
+# (name, result) for the 8 rules, all designed on 2005-2015. Only the 200-day rule and the pendulum
 # are in this repository. The other results come from earlier runs whose rules were not kept, so they
 # can't be rerun; NOT_RERUN marks them.
 NOT_RERUN = "*"
@@ -75,16 +75,16 @@ def plot_equity(result):
 
 def _draw_ideas(ax):
     ax.axis("off")
-    ax.text(0, 1, "8 ideas, designed on 2005-2015", fontsize=12, color=INK, weight="bold",
+    ax.text(0, 1, "Rules, designed on 2005-2015", fontsize=12, color=INK,
             transform=ax.transAxes, va="top")
     for i, (name, outcome) in enumerate(IDEAS):
         y = 0.86 - i * 0.105
         strong = outcome == "held up"
-        style = {"fontsize": 11, "color": INK if strong else MUTED, "weight": "bold" if strong else "normal",
+        style = {"fontsize": 11, "color": INK if strong else MUTED,
                  "transform": ax.transAxes, "va": "top"}
         ax.text(0, y, name, **style)
         ax.text(1, y, outcome, ha="right", **style)
-    ax.text(0, 0.86 - len(IDEAS) * 0.105, f"{NOT_RERUN} earlier result, rules not kept",
+    ax.text(0, 0.86 - len(IDEAS) * 0.105, f"{NOT_RERUN} result from an earlier run, rules not kept",
             fontsize=9, color=MUTED, transform=ax.transAxes, va="top")
 
 

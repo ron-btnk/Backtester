@@ -24,15 +24,17 @@ STYLE = """
     max-width: 1100px; margin: 0 auto; padding: 2.5rem clamp(1rem, 4vw, 3rem) 2rem;
 }
 h1, h2, h3, h4, h5, .lead {font-family: Georgia, "Times New Roman", serif !important; color: #0b0b0b;}
-[data-testid="stMarkdownContainer"] p.lead {font-size: clamp(1.8rem, 4vw, 2.7rem); line-height: 1.15; font-weight: 600;
-    margin: 0 0 0.6rem;}
-[data-testid="stMarkdownContainer"] p.conclusion {font-size: 1.15rem; color: #52514e; margin-bottom: 1.2rem;}
+h2, h3, h4, h5 {font-weight: 500 !important;}
+[data-testid="stMarkdownContainer"] p.lead {font-size: clamp(1.6rem, 3.4vw, 2.2rem); line-height: 1.2; font-weight: 500;
+    margin: 0 0 0.5rem;}
+[data-testid="stMarkdownContainer"] p.conclusion {font-size: 1.1rem; color: #0b0b0b; margin-bottom: 0.2rem;}
+[data-testid="stMarkdownContainer"] p.method {font-size: 0.95rem; color: #52514e; margin-bottom: 1.4rem;}
 .ideas {font-size: 0.95rem; line-height: 1.9;}
 .ideas div {display: flex; justify-content: space-between; border-bottom: 1px solid #ecebe7;}
-.ideas .held {font-weight: 600; color: #0b0b0b;}
+.ideas .held {color: #0b0b0b;}
 .ideas .other {color: #6b6a66;}
 .ideas .note {border: none; font-size: 0.8rem; color: #6b6a66; line-height: 1.4; padding-top: 0.4rem;}
-.number {font-family: Georgia, serif; font-size: 2.6rem; font-weight: 600; line-height: 1; color: #0b0b0b;}
+.number {font-family: Georgia, serif; font-size: 2.4rem; font-weight: 500; line-height: 1; color: #0b0b0b;}
 [data-testid="stMetricValue"] > div {overflow: visible; text-overflow: clip; white-space: nowrap;}
 .katex-display {overflow-x: auto; overflow-y: hidden; padding: 0.25rem 0;}
 </style>
@@ -65,10 +67,10 @@ Signals use the close and trades happen at the next day's open.
 CHECKS = """
 | Check | What it does |
 |---|---|
-| Next-day fills | Signals use the close, orders fill at the next day's open, so a rule never trades on a price it could not have seen |
-| Train/test split | Rules are chosen on one period and judged on a later one they never saw |
-| Random benchmark | 300 strategies with the same holding periods, placed at random times. A real edge should beat most of them |
-| Sensitivity | Every number in the rules is moved to 0.5x, 0.75x, 1.25x and 1.5x. A lucky rule shows up as one good cell |
+| Next-day fills | Signals use the close and orders fill at the next day's open, so no trade uses a price that was not yet known |
+| Train/test split | Rules are set on one period and evaluated on a later period |
+| Random benchmark | 300 strategies with the same holding periods, placed at random times |
+| Sensitivity | Every number in the rules is moved to 0.5x, 0.75x, 1.25x and 1.5x |
 | Number search | Looks for better numbers on the train period only, then reports how they do on the test period |
 | Cost check | Reruns without costs to show how much of the return costs took |
 """
@@ -118,15 +120,16 @@ def ideas_html():
     rows = "".join(
         f'<div class="{"held" if outcome == "held up" else "other"}"><span>{name}</span><span>{outcome}</span></div>'
         for name, outcome in study.IDEAS)
-    note = (f'<div class="note">{study.NOT_RERUN} Earlier result. These rules were not kept, so they '
-            'can\'t be rerun here.</div>')
-    return f'<div class="ideas"><strong>8 ideas on EUR/USD</strong>{rows}{note}</div>'
+    note = f'<div class="note">{study.NOT_RERUN} Result from an earlier run. The rules were not kept.</div>'
+    return f'<div class="ideas"><strong>Rules, designed on 2005-2015</strong>{rows}{note}</div>'
 
 
 def top_of_page():
-    st.markdown('<p class="lead">A backtester built to catch me fooling myself.</p>'
-                '<p class="conclusion">I tested 8 trading ideas on EUR/USD, designed on 2005-2015 and judged '
-                'on 2016-2026. Five failed, one was mixed, two held up.</p>', unsafe_allow_html=True)
+    st.markdown('<p class="lead">Backtester</p>'
+                '<p class="conclusion">8 trading rules for EUR/USD, designed on 2005-2015 and tested on 2016-2026: '
+                '2 held up, 1 was mixed, 5 failed.</p>'
+                '<p class="method">Each rule is tested on years it was not designed on, against random strategies '
+                'and with its numbers shifted.</p>', unsafe_allow_html=True)
     try:
         with st.spinner("Loading the study..."):
             h = headline()
@@ -139,12 +142,11 @@ def top_of_page():
         st.image(h["chart"], width="stretch")
     rnd = h["random"]
     with st.container(border=True):
-        number, text = st.columns([1, 4], vertical_alignment="center")
+        number, text = st.columns([1, 6], vertical_alignment="center")
         number.markdown(f'<div class="number">{rnd["sharpe_beaten_pct"]:.0f}%</div>', unsafe_allow_html=True)
-        text.markdown(f"of {rnd['runs']} random strategies with the same time in the market were beaten by the "
-                      f"200-day trend rule, ranked by Sharpe ({h['full_return']:+.1f}% against "
-                      f"{h['bh_return']:+.1f}% for buy and hold). Rally then dip can't be benchmarked: its "
-                      "rules were not kept.")
+        text.markdown(f"of {rnd['runs']} random strategies with the same time in the market had a lower Sharpe "
+                      f"ratio than the 200-day trend rule. Return {h['full_return']:+.1f}%, buy and hold "
+                      f"{h['bh_return']:+.1f}%. Rally then dip has no benchmark because its rules were not kept.")
 
 
 # ---- Your own backtest ----
@@ -190,7 +192,7 @@ def sidebar_inputs():
                                                      value=float(d["position_pct"]), step=5.0)
         settings["target_vol_pct"] = form.number_input(
             "Target volatility (%)", min_value=0.1, value=None, placeholder="off",
-            help="Hold less when the asset is jumpy. E.g. 15.")
+            help="Scales the position down when volatility is high. E.g. 15.")
         settings["rebalance_pct"] = form.number_input(
             "Rebalance band (%)", min_value=0.0, value=float(d["rebalance_pct"]), step=1.0,
             help="Only trade when the position is this far from its target.")
@@ -347,7 +349,7 @@ def train_test_tab(r, split_date):
         st.info("Switch to advanced mode and set a train/test split date to see how the rules did "
                 "on each period separately.")
         return
-    st.caption(f"Split at {split_date}. A rule that only works before the split was probably fitted to the past.")
+    st.caption(f"Split at {split_date}. Train: the period the rules were set on. Test: the period after it.")
     rows = []
     for name, part in (("Train", r["train"]), ("Test", r["test"])):
         m, bm = part["metrics"], part["bh_metrics"]
@@ -379,7 +381,7 @@ def robustness_tab(ticker, r, store):
         st.write("Not available: the rules have no numbers to vary.")
     else:
         st.write(f"**{sens['stable_pct']:.0f}%** of {sens['tested']} nearby settings beat buy & hold "
-                 f"(Sharpe {sens['bh_sharpe']:.2f}). A real edge shouldn't depend on one exact number.")
+                 f"(Sharpe {sens['bh_sharpe']:.2f}).")
     # the heatmap needs two numbers in the rules, so a rule like PRICE > MA200 only gets the histogram
     notes = []
     if rnd is not None:
@@ -425,8 +427,8 @@ def robustness_tab(ticker, r, store):
         st.dataframe(compare, width="stretch")
         if variants["split"]:
             it, yt = variants["improved_test"]["metrics"], variants["your_test"]["metrics"]
-            st.write(f"On the test period only: Sharpe **{it['sharpe']:.2f}** improved vs **{yt['sharpe']:.2f}** "
-                     "yours. If the improvement disappears here, the search was just fitting the past.")
+            st.write(f"Test period only: Sharpe **{it['sharpe']:.2f}** with the new numbers, "
+                     f"**{yt['sharpe']:.2f}** with yours. The search used the train period only.")
 
 
 def show_study(store):
@@ -476,23 +478,22 @@ def pendulum_study(end):
 
 def pendulum_section():
     d = bt.DEFAULT_STUDY
-    with st.expander("The pendulum: an idea that failed"):
-        st.write("Does EUR/USD move like a pendulum? The 60-day average is the bottom of the swing and price "
-                 "is the pendulum. Rules were set on 2005-2015 and tested on 2016 onwards.")
-        st.caption("Equation of motion, for small swings")
+    with st.expander("Pendulum model (failed)"):
+        st.write("The model treats the 60-day average as the bottom of a pendulum's swing and the price as the "
+                 "pendulum. Rules were set on 2005-2015 and tested from 2016 on.")
+        st.caption("Equation of motion for small swings")
         st.latex(r"\frac{d^2\theta}{dt^2} = -\omega^2\,\theta")
-        st.caption(r"Its energy ½v² + ½ω²θ² tells you how far the swing will go")
+        st.caption(r"From the constant energy ½v² + ½ω²θ², the amplitude of the swing")
         st.latex(r"\text{amplitude} = \sqrt{\theta^2 + \frac{v^2}{\omega^2}}")
         st.markdown(
-            "- **θ**: how far price is from its 60-day average, in standard deviations\n"
-            "- **v**: how much θ changed since yesterday\n"
-            "- **ω²**: 0.01, how strongly price is pulled back (a swing of about 63 days)\n\n"
-            "Markets aren't a perfect pendulum, so friction lets the swing keep only 80% of that.\n\n"
-            "Buy when a swing bottoms out below -1.5 and sell when it reaches 80% of the predicted "
-            "amplitude on the other side. If price runs past 3 standard deviations, the average has "
-            "probably moved, so get out. Shorts are the mirror image.\n\n"
-            "The first version used the full equation with sin and arccos and assumed the market conserves "
-            "energy. It was rewritten because the physics was wrong, not to improve the result.")
+            "- **θ**: distance of the price from its 60-day average, in standard deviations\n"
+            "- **v**: change in θ since the previous day\n"
+            "- **ω²**: 0.01, a full swing of about 63 days\n\n"
+            "Buy when a swing turns below θ = -1.5. Sell when θ reaches 0.8 times the amplitude on the "
+            "other side; the factor 0.8 accounts for friction. Close the position if θ passes 3. Shorts are "
+            "the mirror image.\n\n"
+            "An earlier version used the full equation with sin and arccos and assumed constant energy. It was "
+            "replaced because the physics was incorrect, not because of its result.")
         st.code("\n".join(d["settings"][key] for _, key in bt.RULE_SIDES), language=None, wrap_lines=True)
         return st.button("Run the pendulum study with all checks")
 
@@ -505,14 +506,14 @@ def main():
     st.write("")
     st.markdown("Use the sidebar to test your own rules on any ticker from Yahoo Finance, from any start date.")
     run_default = pendulum_section()
-    with st.expander("The checks every backtest goes through"):
+    with st.expander("Checks in every backtest"):
         st.markdown(CHECKS)
-    with st.expander("How to write rules"):
+    with st.expander("Rule syntax"):
         st.markdown(GUIDE)
 
     if run_default:
         st.session_state["problems"] = []
-        with st.spinner("Running the pendulum study with all checks. This can take a minute...", show_time=True):
+        with st.spinner("Running the pendulum study with all checks. This takes about a minute.", show_time=True):
             store = pendulum_study(date.today().isoformat())
         if not store["results"]:
             pendulum_study.clear()  # e.g. Yahoo was unreachable: try again next time
@@ -522,7 +523,7 @@ def main():
         st.session_state["problems"] = problems
         st.session_state.pop("study", None)
         if not problems:
-            message = ("Running the backtest and the robustness checks. This can take a minute..."
+            message = ("Running the backtest and the robustness checks. This takes about a minute."
                        if advanced else "Running the backtest...")
             with st.spinner(message, show_time=True):
                 st.session_state["study"] = {**analyse(*inputs, advanced), "title": "Your backtest"}
