@@ -2,20 +2,18 @@
 
 [![tests](https://github.com/ron-btnk/Backtester/actions/workflows/tests.yml/badge.svg)](https://github.com/ron-btnk/Backtester/actions/workflows/tests.yml)
 
-## A backtester built to catch me fooling myself.
+8 trading rules for EUR/USD, designed on 2005-2015 and tested on 2016-2026: 2 held up, 1 was mixed, 5 failed. Each rule is tested on years it was not designed on, against random strategies and with its numbers shifted.
 
-I tested 8 trading ideas on EUR/USD, designed on 2005-2015 and judged on 2016-2026. Five failed, one was mixed, two held up.
+![8 rules marked held up, mixed or failed, next to the 200-day trend rule's portfolio value against buy and hold on EUR/USD, with the train | test split at 2016](docs/headline.png)
 
-![8 ideas marked held up, mixed or failed, next to the 200-day trend rule's portfolio value against buy and hold on EUR/USD, with the train | test split at 2016](docs/headline.png)
+**88%** of 300 random strategies with the same time in the market had a lower Sharpe ratio than the 200-day trend rule (263 of 300). Rally then dip has no benchmark because its rules were not kept.
 
-**88%.** The 200-day trend rule beat 263 of 300 random strategies that spent the same time in the market, ranked by Sharpe. Rally then dip can't be benchmarked, because its rules were not kept.
-
-[Open the web app](https://backtester-rbtnk.streamlit.app/) to try your own rules, or run it locally (below).
+Web app: https://backtester-rbtnk.streamlit.app/
 
 <details>
-<summary><b>Run it</b></summary>
+<summary><b>Running it</b></summary>
 
-Online: https://backtester-rbtnk.streamlit.app/. It runs on a small free server that sleeps after 12 hours without visitors, so the first load can take a minute.
+Online: https://backtester-rbtnk.streamlit.app/. The free server sleeps after 12 hours without visitors, so the first load can take a minute.
 
 Locally, as a web app:
 
@@ -35,11 +33,11 @@ To reproduce the numbers and the picture above: `python study.py`.
 </details>
 
 <details>
-<summary><b>The study: 8 ideas on EUR/USD</b></summary>
+<summary><b>The study: 8 rules on EUR/USD</b></summary>
 
 Every rule was designed on 2005-2015 and tested once on 2016-2026. Costs were 0.02% per trade. Buy and hold lost 17.6% from 2005-01-03 to 2026-10-15.
 
-| Idea | What it bets on | Result |
+| Rule | Assumption | Result |
 |---|---|---|
 | 200-day trend | Long above the 200-day average, short below | Held up. +27.4%, positive in both periods (+14.0% train, +10.8% test) |
 | Rally then dip* | Profit-takers cause a dip, latecomers buy it | Held up. About +31%, positive in both periods |
@@ -50,29 +48,29 @@ Every rule was designed on 2005-2015 and tested once on 2016-2026. Costs were 0.
 | Equilibrium mean reversion* | Bet on a return to the average | Failed on 2005-2015, not tested further |
 | Break-even sellers* | Old highs act as resistance, old lows as support | Failed on 2005-2015, not tested further |
 
-\* Result from an earlier run. These rules were not kept, so they can't be rerun or benchmarked.
+\* Result from an earlier run. The rules were not kept, so they cannot be rerun or benchmarked.
 
-The 200-day rule is a classic trend rule, and research found trend rules profitable on currencies in the 1980s and 90s. It was fixed before looking at any data. Its weak spot: one trade made 82% of its profit, so the result rests on a few long trends. Rally then dip was designed for this study, and its sensitivity heatmap was green for every nearby setting. The next test is running both, unchanged, on other currency pairs.
+The 200-day rule is a standard trend rule; published studies found trend rules profitable on currencies in the 1980s and 1990s. It was fixed before any data was examined. One trade made 82% of its profit, so the result depends on a few long trends. Rally then dip was designed for this study; every nearby setting in its sensitivity check beat buy and hold. The next step is to run both rules, unchanged, on other currency pairs.
 
-EUR/USD was chosen because it is the most traded currency pair, costs are low, and its price is not affected by earnings, dividends or stock splits. Many large traders in currencies, such as central banks and companies hedging payments, trade for reasons other than profit, which is where an edge would have to come from.
+EUR/USD was chosen because it is the most traded currency pair, costs are low, and its price is not affected by earnings, dividends or stock splits. Many participants, such as central banks and companies hedging payments, trade for reasons other than profit.
 
 </details>
 
 <details>
-<summary><b>The checks every backtest goes through</b></summary>
+<summary><b>Checks in every backtest</b></summary>
 
 Prices are daily Open, High, Low and Close from Yahoo Finance, with 500 extra days loaded before the start date so long averages are ready on day one.
 
 | Check | What it does |
 |---|---|
-| Next-day fills | Signals use each day's close and orders fill at the next day's open, so a rule never trades on a price it could not have known |
-| Train/test split | Rules are chosen on one period and judged on a later one they never saw |
-| Random benchmark | 300 strategies with the same holding periods, placed at random times. A real edge should beat most of them |
-| Sensitivity | Every number in the rules is moved to 0.5x, 0.75x, 1.25x and 1.5x. A lucky rule shows up as a single good cell in a heatmap |
+| Next-day fills | Signals use each day's close and orders fill at the next day's open, so no trade uses a price that was not yet known |
+| Train/test split | Rules are set on one period and evaluated on a later period |
+| Random benchmark | 300 strategies with the same holding periods, placed at random times |
+| Sensitivity | Every number in the rules is moved to 0.5x, 0.75x, 1.25x and 1.5x and the results are shown in a heatmap |
 | Number search | Looks for better numbers on the training period only, then reports how they do on the test period |
 | Cost check | Reruns without costs to show how much of the return costs took |
 
-Every trade pays a cost as a percentage of the traded value, and short positions pay a daily borrow fee. If a short signal arrives while the strategy is long, the position flips directly. Stops and take profits are checked on the close and filled at the next open. Each backtest ends with a verdict that lists what passed and what failed.
+Every trade pays a cost as a percentage of the traded value, and short positions pay a daily borrow fee. If a short signal arrives while the strategy is long, the position flips directly. Stops and take profits are checked on the close and filled at the next open. Each backtest ends with a summary of the checks.
 
 </details>
 
@@ -111,7 +109,7 @@ Optional settings: position sizing by an indicator, volatility targeting, a reba
 <details>
 <summary><b>The pendulum model</b></summary>
 
-The pendulum model failed. On EUR/USD it did about as well as buy and hold and no better than random timing. Numbers are for 2005-01-03 to 2026-10-15.
+Result: failed. On EUR/USD the model did about as well as buy and hold and no better than random timing. Numbers are for 2005-01-03 to 2026-10-15.
 
 | | Pendulum | Buy and hold |
 |---|---|---|
@@ -157,16 +155,16 @@ Verdict: doesn't hold up
   29% of 28 nearby settings beat buy & hold
 ```
 
-It lost to buy and hold in 2005-2015 (Sharpe -0.13 against -0.07) and beat it in 2016-2026 (0.16 against 0.07), which is what noise looks like. The worst trades were longs held for 4 to 8 months through long declines. In a slow decline the average falls with the price, so the price probably never looks far enough from equilibrium to trigger an exit. The number search found a 48-day window that made +17.7% over the full period but did worse than the original on 2016-2026 alone (Sharpe -0.03 against 0.16), so it was fitting the past.
+It lost to buy and hold in 2005-2015 (Sharpe -0.13 against -0.07) and beat it in 2016-2026 (0.16 against 0.07), a pattern consistent with noise. The worst trades were longs held for 4 to 8 months through long declines. In a slow decline the average falls with the price, so the price rarely moves far enough from it to trigger an exit. The number search found a 48-day window that made +17.7% over the full period but did worse than the original on 2016-2026 alone (Sharpe -0.03 against 0.16), so the search fitted the training period.
 
-This is the second version of the model. The first used the full equation with sin and arccos, which treats θ as a real angle even though it is measured in standard deviations, and it assumed the market conserves energy. In an earlier run it lost 23.1% against 16.6% for buy and hold and beat 25% of random strategies. The model was rewritten because the physics was wrong, not to improve the result, so the second version also had a single test.
+This is the second version of the model. The first used the full equation with sin and arccos, which treats θ as a real angle even though it is measured in standard deviations, and it assumed the market conserves energy. In an earlier run it lost 23.1% against 16.6% for buy and hold and beat 25% of random strategies. It was replaced because the physics was incorrect, not because of its result, and the second version was also tested once.
 
 </details>
 
 <details>
-<summary><b>Why two out of eight is not proof</b></summary>
+<summary><b>Multiple testing</b></summary>
 
-Testing many strategies on the same data produces winners by luck. If a useless rule has a 50% chance of beating buy and hold in a period, and the two periods are independent:
+Testing many strategies on the same data produces winners by luck. If a rule with no predictive value has a 50% chance of beating buy and hold in a period, and the two periods are independent:
 
 $$P(\text{at least one of } n \text{ wins one period}) = 1 - 0.5^n \qquad P(\text{at least one of } n \text{ wins both periods}) = 1 - 0.75^n$$
 
@@ -176,7 +174,7 @@ $$P(\text{at least one of } n \text{ wins one period}) = 1 - 0.5^n \qquad P(\tex
 | 8 | 99.6% | 90.0% | 2.0 |
 | 20 | >99.99% | 99.7% | 5.0 |
 
-Two periods reduce the problem but do not solve it. Eight useless rules would produce two winners in both periods on average, the same number this study found. That is why the random benchmark, the sensitivity check and the fixed 200-day rule matter more than the split itself, and why the next step is testing on currency pairs that were not used to design the rules.
+Two periods reduce the problem but do not solve it. Eight such rules would produce two winners in both periods on average, the same number this study found. That is why the random benchmark, the sensitivity check and the fixed 200-day rule matter more than the split itself, and why the next step is testing on currency pairs that were not used to design the rules.
 
 </details>
 

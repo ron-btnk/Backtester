@@ -51,21 +51,19 @@ _TURN = f"0.8 * SQRT(({_T}) ^ 2 + ({_T} - {_T1}) ^ 2 / 0.01)"
 
 DEFAULT_STUDY = {
     "physics": """
-Default study: does EUR/USD move like a pendulum?
+Default study: pendulum model on EUR/USD
 
-The 60-day average is the bottom of the swing, and price is the pendulum.
-  θ   how far price is from its 60-day average, in standard deviations
-  v   how much θ changed since yesterday
-  ω²  0.01, how strongly price is pulled back (a swing of about 63 days)
+The 60-day average is the bottom of the swing and the price is the pendulum.
+  θ   distance of the price from its 60-day average, in standard deviations
+  v   change in θ since the previous day
+  ω²  0.01, a full swing of about 63 days
 
-For small swings a pendulum follows  d²θ/dt² = -ω²θ.  Its energy ½v² + ½ω²θ² tells you how far
-the swing will go:  amplitude = √(θ² + v²/ω²).  Markets aren't a perfect pendulum, so friction
-lets the swing keep only 80% of that, and news can knock it off course completely.
+For small swings  d²θ/dt² = -ω²θ.  From the constant energy ½v² + ½ω²θ², the amplitude of
+the swing is  √(θ² + v²/ω²).
 
-Buy when a swing bottoms out below -1.5 and sell when it reaches 80% of the predicted
-amplitude on the other side. If price runs past 3 standard deviations, the average has
-probably moved, so get out. Shorts are the mirror image.
-Rules were set using 2005-2015 and tested on 2016 onwards.""",
+Buy when a swing turns below θ = -1.5. Sell when θ reaches 0.8 times the amplitude on the
+other side; the factor 0.8 accounts for friction. Close the position if θ passes 3.
+Shorts are the mirror image. Rules were set on 2005-2015 and tested from 2016 on.""",
     "tickers": ["EURUSD=X"],
     "start": "2005-01-01",
     "end": date.today().isoformat(),
