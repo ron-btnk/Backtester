@@ -24,7 +24,7 @@ from datetime import date
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.colors import TwoSlopeNorm
+from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 try:
     import yfinance as yf
 except ImportError:
@@ -1180,83 +1180,130 @@ def print_summary(rows):
 
 # ---- Charts ----
 
+# one look for every chart: blue for the strategy and long positions, orange for shorts, grey dashed
+# buy & hold, serif text, no box around the plot
+STRATEGY_COLOR, SHORT_COLOR, REFERENCE_COLOR = "#2a78d6", "#eb6834", "#8f8e89"
+INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e6e5e1"
+CHART_STYLE = {"font.family": "serif", "axes.titlesize": 11, "axes.titlelocation": "left",
+               "axes.titlecolor": INK, "axes.edgecolor": "#c9c8c3", "axes.labelcolor": MUTED,
+               "axes.labelsize": 9.5, "xtick.color": MUTED, "ytick.color": MUTED, "xtick.labelsize": 9,
+               "ytick.labelsize": 9, "legend.fontsize": 9, "legend.frameon": False,
+               "figure.facecolor": "white"}
+
+
+def _tidy(ax):
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    ax.grid(axis="y", color=GRID, linewidth=0.8)
+    ax.set_axisbelow(True)
+
+
+def _end_labels(ax, pairs):
+    """Name each line at its right end instead of in a legend."""
+    for series, name, color in pairs:
+        ax.text(series.index[-1], series.iloc[-1], f" {name}", color=color, va="center", fontsize=9.5,
+                clip_on=False)
+
+
 def plot_results(ticker, r, split_date=None, compact=False):
+    with plt.rc_context(CHART_STYLE):
+        return _plot_results(ticker, r, split_date, compact)
+
+
+def _plot_results(ticker, r, split_date, compact):
     full = r["full"]
     close, weights, trades = full["close"], full["weights"], full["trades"]
     has_shorts = bool((weights < 0).any())
     ratios = [2, 2] if compact else [2, 2, 1, 1]
-    fig, axes = plt.subplots(len(ratios), 1, figsize=(13, 7 if compact else 12), sharex=True,
-                             gridspec_kw={"height_ratios": ratios})
+    fig, axes = plt.subplots(len(ratios), 1, figsize=(12, 6.4 if compact else 10), sharex=True,
+                             gridspec_kw={"height_ratios": ratios, "hspace": 0.45})
     price_ax, equity_ax = axes[0], axes[1]
 
-    price_ax.plot(close.index, close.values, color="black", linewidth=1, label="Price")
-    price_ax.fill_between(close.index, 0, 1, where=(weights > 0).to_numpy(), step="post",
-                          transform=price_ax.get_xaxis_transform(), color="green", alpha=0.15, label="Long")
+    price_ax.plot(close.index, close.values, color=INK, linewidth=0.9)
+    shade = {"step": "post", "linewidth": 0, "transform": price_ax.get_xaxis_transform()}
+    price_ax.fill_between(close.index, 0, 1, where=(weights > 0).to_numpy(), color=STRATEGY_COLOR, alpha=0.12,
+                          label="Long", **shade)
     if has_shorts:
-        price_ax.fill_between(close.index, 0, 1, where=(weights < 0).to_numpy(), step="post",
-                              transform=price_ax.get_xaxis_transform(), color="red", alpha=0.15, label="Short")
+        price_ax.fill_between(close.index, 0, 1, where=(weights < 0).to_numpy(), color=SHORT_COLOR, alpha=0.14,
+                              label="Short", **shade)
     if not trades.empty and len(trades) <= MAX_MARKERS:
         longs = pd.to_datetime(trades.loc[trades["side"] == "long", "entry_date"])
         shorts = pd.to_datetime(trades.loc[trades["side"] == "short", "entry_date"])
         exits = pd.to_datetime(trades.loc[trades["status"] == "closed", "exit_date"])
-        price_ax.scatter(longs, close.reindex(longs).values, marker="^", color="green", s=50, zorder=3,
-                         label="Buy")
+        ring = {"s": 42, "zorder": 3, "edgecolors": "white", "linewidths": 0.8}
+        price_ax.scatter(longs, close.reindex(longs).values, marker="^", color=STRATEGY_COLOR, label="Buy",
+                         **ring)
         if len(shorts):
-            price_ax.scatter(shorts, close.reindex(shorts).values, marker="v", color="red", s=50, zorder=3,
-                             label="Short")
-        price_ax.scatter(exits, close.reindex(exits).values, marker="x", color="black", s=40, zorder=3,
+            price_ax.scatter(shorts, close.reindex(shorts).values, marker="v", color=SHORT_COLOR,
+                             label="Short entry", **ring)
+        price_ax.scatter(exits, close.reindex(exits).values, marker="x", color=INK, s=22, linewidths=1, zorder=3,
                          label="Close position")
-    title = "green = long, red = short" if has_shorts else "green = invested"
-    price_ax.set_title(f"{ticker}: price ({title})")
-    price_ax.legend(loc="upper left")
+    # the legend sits in one row between the title and the plot
+    price_ax.set_title(f"{ticker} price, shaded while a position is open", pad=24)
+    price_ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=5, borderaxespad=0.1, handlelength=1.2,
+                    borderpad=0)
 
-    equity_ax.plot(full["strategy"].index, full["strategy"].values, label="Strategy", linewidth=1.5)
-    equity_ax.plot(full["buy_hold"].index, full["buy_hold"].values, label="Buy & hold",
-                   color="red", linestyle="--")
-    equity_ax.set_title("Portfolio value")
-    equity_ax.legend(loc="upper left")
+    strategy, buy_hold = full["strategy"], full["buy_hold"]
+    equity_ax.plot(strategy.index, strategy.values, color=STRATEGY_COLOR, linewidth=1.3)
+    equity_ax.plot(buy_hold.index, buy_hold.values, color=REFERENCE_COLOR, linewidth=1.1, linestyle="--")
+    _end_labels(equity_ax, ((strategy, "strategy", INK), (buy_hold, "buy & hold", MUTED)))
+    equity_ax.set_title(f"Portfolio value, starting at {strategy.iloc[0]:,.0f}")
 
     if not compact:
         weight_ax, dd_ax = axes[2], axes[3]
         pct = weights * 100
-        weight_ax.fill_between(pct.index, pct.clip(lower=0).values, step="post", color="green", alpha=0.4)
-        weight_ax.fill_between(pct.index, pct.clip(upper=0).values, step="post", color="red", alpha=0.4)
+        weight_ax.fill_between(pct.index, pct.clip(lower=0).values, step="post", color=STRATEGY_COLOR, alpha=0.5,
+                               linewidth=0)
+        weight_ax.fill_between(pct.index, pct.clip(upper=0).values, step="post", color=SHORT_COLOR, alpha=0.5,
+                               linewidth=0)
         weight_ax.set_ylim(-105 if has_shorts else 0, 105)
-        weight_ax.axhline(0, color="black", linewidth=0.5)
-        weight_ax.set_title("% of money invested (negative = short)" if has_shorts else "% of money invested")
+        weight_ax.axhline(0, color=MUTED, linewidth=0.6)
+        weight_ax.set_title("% of money invested, below zero is short" if has_shorts else "% of money invested")
 
-        dd = full["metrics"]["drawdown"]
-        bh_dd = full["bh_metrics"]["drawdown"]
-        dd_ax.plot(dd.index, dd.values, label="Strategy")
-        dd_ax.plot(bh_dd.index, bh_dd.values, color="red", linestyle="--", label="Buy & hold")
-        dd_ax.set_title("Drawdown (%)")
-        dd_ax.legend(loc="lower left")
+        dd, bh_dd = full["metrics"]["drawdown"], full["bh_metrics"]["drawdown"]
+        dd_ax.plot(dd.index, dd.values, color=STRATEGY_COLOR, linewidth=1.1)
+        dd_ax.plot(bh_dd.index, bh_dd.values, color=REFERENCE_COLOR, linewidth=1, linestyle="--")
+        _end_labels(dd_ax, ((dd, "strategy", INK), (bh_dd, "buy & hold", MUTED)))
+        dd_ax.set_title("Drawdown, % below the previous high")
 
+    for ax in axes:
+        _tidy(ax)
+    price_ax.set_xlim(close.index[0], close.index[-1])
     if split_date:
+        split = pd.Timestamp(split_date)
         for ax in axes:
-            ax.axvline(pd.Timestamp(split_date), color="grey", linestyle=":")
-
-    plt.tight_layout()
+            ax.axvline(split, color=MUTED, linewidth=1)
+        equity_ax.text(split, 1.01, "train  |  test", transform=equity_ax.get_xaxis_transform(), ha="center",
+                       va="bottom", fontsize=9.5, color=INK)
+    fig.subplots_adjust(left=0.06, right=0.9, top=0.9 if compact else 0.93, bottom=0.05)
     return fig
 
 
 def plot_checks(ticker, r):
+    with plt.rc_context(CHART_STYLE):
+        return _plot_checks(r)
+
+
+def _plot_checks(r):
     rnd, sens = r["random"], r["sens"]
     grid = sens["grid"] if sens else None
     panels = [p for p in (rnd, grid) if p is not None]
     if not panels:
         return None
-    fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5.5))
+    fig, axes = plt.subplots(1, len(panels), figsize=(12, 4.2))
     axes = np.atleast_1d(axes)
     i = 0
 
     if rnd is not None:
         ax = axes[i]
-        ax.hist(rnd["random_returns"], bins=30, color="grey", alpha=0.7, label="Random strategies")
-        ax.axvline(rnd["own_return"], color="blue", linewidth=2, label="Your rule")
-        ax.set_title(f"Your rule vs {rnd['runs']} random strategies")
+        ax.hist(rnd["random_returns"], bins=30, color=REFERENCE_COLOR, alpha=0.75, edgecolor="white", linewidth=1)
+        ax.axvline(rnd["own_return"], color=STRATEGY_COLOR, linewidth=2)
+        ax.text(rnd["own_return"], 0.97, f" your rule {rnd['own_return']:+.1f}%",
+                transform=ax.get_xaxis_transform(), color=INK, fontsize=9.5, va="top")
+        ax.set_title(f"Total return of {rnd['runs']} random strategies")
         ax.set_xlabel("Total return (%)")
-        ax.legend()
+        ax.set_ylabel("Random strategies")
+        _tidy(ax)
         i += 1
 
     if grid is not None:
@@ -1265,8 +1312,11 @@ def plot_checks(ticker, r):
         centre = sens["bh_sharpe"]
         low = min(np.nanmin(matrix), centre - 0.01)
         high = max(np.nanmax(matrix), centre + 0.01)
-        image = ax.imshow(matrix, cmap="RdYlGn", origin="lower", aspect="auto",
-                          norm=TwoSlopeNorm(vmin=low, vcenter=centre, vmax=high))
+        # orange below buy & hold, grey at it, blue above
+        cmap = LinearSegmentedColormap.from_list("vs_buy_hold", [SHORT_COLOR, "#f1f0ec", STRATEGY_COLOR])
+        # every cell is labelled with its Sharpe, so there is no colour bar
+        ax.imshow(matrix, cmap=cmap, origin="lower", aspect="auto",
+                  norm=TwoSlopeNorm(vmin=low, vcenter=centre, vmax=high))
         ax.set_xticks(range(len(grid["values_b"])), [f"{v:g}" for v in grid["values_b"]])
         ax.set_yticks(range(len(grid["values_a"])), [f"{v:g}" for v in grid["values_a"]])
         ax.set_xlabel(grid["label_b"])
@@ -1274,15 +1324,16 @@ def plot_checks(ticker, r):
         for y in range(matrix.shape[0]):
             for x in range(matrix.shape[1]):
                 if not np.isnan(matrix[y, x]):
-                    ax.text(x, y, f"{matrix[y, x]:.2f}", ha="center", va="center", fontsize=9)
+                    ax.text(x, y, f"{matrix[y, x]:.2f}", ha="center", va="center", fontsize=9, color=INK)
         if grid["original_a"] in grid["values_a"] and grid["original_b"] in grid["values_b"]:
             y = grid["values_a"].index(grid["original_a"])
             x = grid["values_b"].index(grid["original_b"])
-            ax.add_patch(plt.Rectangle((x - 0.5, y - 0.5), 1, 1, fill=False, edgecolor="black", linewidth=2))
-        ax.set_title(f"Sharpe for nearby settings (green beats buy & hold {centre:.2f})")
-        fig.colorbar(image, ax=ax)
+            ax.add_patch(plt.Rectangle((x - 0.5, y - 0.5), 1, 1, fill=False, edgecolor=INK, linewidth=1.8))
+        ax.set_title(f"Sharpe for nearby settings (blue beats buy & hold, {centre:.2f})")
+        for spine in ax.spines.values():
+            spine.set_visible(False)
 
-    plt.tight_layout()
+    fig.tight_layout()
     return fig
 
 

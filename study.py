@@ -40,9 +40,7 @@ IDEAS = [
     ("Break-even sellers" + NOT_RERUN, "failed"),
 ]
 
-STRATEGY_COLOR = "#2a78d6"
-REFERENCE_COLOR = "#8f8e89"
-INK, MUTED = "#0b0b0b", "#52514e"
+STRATEGY_COLOR, REFERENCE_COLOR, INK, MUTED = bt.STRATEGY_COLOR, bt.REFERENCE_COLOR, bt.INK, bt.MUTED
 
 
 def run(prices=None):
