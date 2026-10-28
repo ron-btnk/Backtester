@@ -25,19 +25,19 @@ TREND = {
     **bt.QUICK_DEFAULTS,
 }
 
-# (name, result) for the 8 rules, all designed on 2005-2015. Only the 200-day rule and the pendulum
-# are in this repository. The other results come from earlier runs whose rules were not kept, so they
-# can't be rerun; NOT_RERUN marks them.
+# (name, result, detail) for the 8 rules, all designed on 2005-2015. Only the 200-day rule and the
+# pendulum are in this repository; their details are this script's and the README's numbers. The other
+# results come from earlier runs whose rules were not kept, so they can't be rerun; NOT_RERUN marks them.
 NOT_RERUN = "*"
 IDEAS = [
-    ("200-day trend", "held up"),
-    ("Rally then dip" + NOT_RERUN, "held up"),
-    ("Break-even vs momentum" + NOT_RERUN, "mixed"),
-    ("Pendulum", "failed"),
-    ("Short-term reversal" + NOT_RERUN, "failed"),
-    ("Failed breakouts" + NOT_RERUN, "failed"),
-    ("Equilibrium mean reversion" + NOT_RERUN, "failed"),
-    ("Break-even sellers" + NOT_RERUN, "failed"),
+    ("200-day trend", "held up", "+27.4%, positive in train and test"),
+    ("Rally then dip" + NOT_RERUN, "held up", "About +31%, positive in train and test"),
+    ("Break-even vs momentum" + NOT_RERUN, "mixed", "About flat, lost in train, gained in test"),
+    ("Pendulum", "failed", "-16.0%, above 52% of random strategies"),
+    ("Short-term reversal" + NOT_RERUN, "failed", "About -48%, mostly costs"),
+    ("Failed breakouts" + NOT_RERUN, "failed", "About -42%, all nearby settings lost"),
+    ("Equilibrium mean reversion" + NOT_RERUN, "failed", "Failed on 2005-2015"),
+    ("Break-even sellers" + NOT_RERUN, "failed", "Failed on 2005-2015"),
 ]
 
 STRATEGY_COLOR, REFERENCE_COLOR, INK, MUTED = bt.STRATEGY_COLOR, bt.REFERENCE_COLOR, bt.INK, bt.MUTED
@@ -65,10 +65,10 @@ def plot(result):
 
 
 def plot_equity(result):
-    """The equity panel alone, for the app, which lists the ideas next to it as text."""
+    """The equity panel alone, for the app, which gives it a title and lists the rules as text."""
     with plt.rc_context({"font.family": "serif"}):
-        fig, ax = plt.subplots(figsize=(8, 3.6))
-        _draw_equity(ax, result["full"])
+        fig, ax = plt.subplots(figsize=(8, 4.4))
+        _draw_equity(ax, result["full"], title=False)
         fig.tight_layout()
     return fig
 
@@ -77,7 +77,7 @@ def _draw_ideas(ax):
     ax.axis("off")
     ax.text(0, 1, "Rules, designed on 2005-2015", fontsize=12, color=INK,
             transform=ax.transAxes, va="top")
-    for i, (name, outcome) in enumerate(IDEAS):
+    for i, (name, outcome, _) in enumerate(IDEAS):
         y = 0.86 - i * 0.105
         strong = outcome == "held up"
         style = {"fontsize": 11, "color": INK if strong else MUTED,
@@ -88,7 +88,7 @@ def _draw_ideas(ax):
             fontsize=9, color=MUTED, transform=ax.transAxes, va="top")
 
 
-def _draw_equity(ax, full):
+def _draw_equity(ax, full, title=True):
     strategy, buy_hold = full["strategy"], full["buy_hold"]
     ax.plot(strategy.index, strategy.values, color=STRATEGY_COLOR, linewidth=1.3)
     ax.plot(buy_hold.index, buy_hold.values, color=REFERENCE_COLOR, linewidth=1.1, linestyle="--")
@@ -101,8 +101,9 @@ def _draw_equity(ax, full):
     ax.axvline(split, color=MUTED, linewidth=1)
     ax.text(split, 1.02, "train  |  test", transform=ax.get_xaxis_transform(), ha="center", va="bottom",
             fontsize=10, color=INK)
-    ax.set_title(f"EUR/USD {full['start'].year}-{full['end'].year}, value of 10,000 after 0.02% costs",
-                 fontsize=11, color=INK, pad=22)
+    if title:
+        ax.set_title(f"EUR/USD {full['start'].year}-{full['end'].year}, value of 10,000 after 0.02% costs",
+                     fontsize=11, color=INK, pad=22)
     ax.set_xlim(strategy.index[0], strategy.index[-1])
     ax.grid(axis="y", color="#e6e5e1", linewidth=0.8)
     for side in ("top", "right"):
