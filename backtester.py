@@ -1179,11 +1179,11 @@ def print_summary(rows):
 # ---- Charts ----
 
 # one look for every chart: blue for the strategy and long positions, orange for shorts, grey dashed
-# buy & hold, serif text, no box around the plot
-STRATEGY_COLOR, SHORT_COLOR, REFERENCE_COLOR = "#2a78d6", "#eb6834", "#8f8e89"
-INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e6e5e1"
-CHART_STYLE = {"font.family": "serif", "axes.titlesize": 11, "axes.titlelocation": "left",
-               "axes.titlecolor": INK, "axes.edgecolor": "#c9c8c3", "axes.labelcolor": MUTED,
+# buy & hold, sans-serif text, no box around the plot
+STRATEGY_COLOR, SHORT_COLOR, REFERENCE_COLOR = "#2a78d6", "#eb6834", "#94a3b8"
+INK, MUTED, GRID = "#0f172a", "#475569", "#e2e8f0"
+CHART_STYLE = {"font.family": "sans-serif", "axes.titlesize": 11, "axes.titlelocation": "left",
+               "axes.titlecolor": INK, "axes.edgecolor": "#cbd5e1", "axes.labelcolor": MUTED,
                "axes.labelsize": 9.5, "xtick.color": MUTED, "ytick.color": MUTED, "xtick.labelsize": 9,
                "ytick.labelsize": 9, "legend.fontsize": 9, "legend.frameon": False,
                "figure.facecolor": "white"}
@@ -1311,7 +1311,7 @@ def _plot_checks(r):
         low = min(np.nanmin(matrix), centre - 0.01)
         high = max(np.nanmax(matrix), centre + 0.01)
         # orange below buy & hold, grey at it, blue above
-        cmap = LinearSegmentedColormap.from_list("vs_buy_hold", [SHORT_COLOR, "#f1f0ec", STRATEGY_COLOR])
+        cmap = LinearSegmentedColormap.from_list("vs_buy_hold", [SHORT_COLOR, "#f1f5f9", STRATEGY_COLOR])
         # every cell is labelled with its Sharpe, so there is no colour bar
         ax.imshow(matrix, cmap=cmap, origin="lower", aspect="auto",
                   norm=TwoSlopeNorm(vmin=low, vcenter=centre, vmax=high))

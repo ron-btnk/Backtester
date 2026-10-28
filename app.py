@@ -18,51 +18,55 @@ RULE_LABELS = {"buy_rule": "Buy rule", "sell_rule": "Sell rule", "short_rule": "
                "cover_rule": "Cover rule"}
 EARLIEST = date(1970, 1, 1)
 
-# a readable width with the sidebar open or closed, serif headings, and numbers that are never cut off
+# colours and fonts live in .streamlit/config.toml; this adds the page width, the cards on the top of the
+# page, and numbers that are never cut off
+MONO = "'JetBrains Mono', ui-monospace, Consolas, monospace"
 STYLE = """
 <style>
 [data-testid="stMainBlockContainer"] {
-    max-width: 1100px; margin: 0 auto; padding: 2.5rem clamp(1rem, 4vw, 3rem) 2rem;
+    max-width: 1120px; margin: 0 auto; padding: 2.5rem clamp(1rem, 4vw, 3rem) 2rem;
 }
-h1, h2, h3, h4, h5, .lead {font-family: Georgia, "Times New Roman", serif !important; color: #0b0b0b;}
-h2, h3, h4, h5 {font-weight: 500 !important;}
-[data-testid="stMarkdownContainer"] p.lead {font-size: clamp(1.6rem, 3.4vw, 2.2rem); line-height: 1.2; font-weight: 500;
-    margin: 0 0 0.5rem;}
-[data-testid="stMarkdownContainer"] p.conclusion {font-size: 1.1rem; color: #0b0b0b; margin-bottom: 0.2rem;}
-[data-testid="stMarkdownContainer"] p.method {font-size: 0.95rem; color: #52514e; margin-bottom: 1.4rem;}
-.stApp {background: #f6f6f3;}
+[data-testid="stHeader"] {background: #f6f8fb;}
+h1, h2, h3, h4, h5 {letter-spacing: -0.015em;}
+[data-testid="stMarkdownContainer"] p.lead {font-size: clamp(1.7rem, 3.6vw, 2.3rem); line-height: 1.15; font-weight: 700;
+    letter-spacing: -0.03em; color: #0f172a; margin: 0 0 0.6rem; display: flex; align-items: center; gap: 0.7rem;
+    flex-wrap: wrap;}
+.pill {font-family: MONO; font-size: 0.72rem; font-weight: 500; letter-spacing: 0; color: #1d4ed8; background: #e0eaff;
+    border-radius: 99px; padding: 0.2rem 0.6rem;}
+[data-testid="stMarkdownContainer"] p.conclusion {font-size: 1.02rem; font-weight: 500; color: #0f172a; margin-bottom: 0.2rem;}
+[data-testid="stMarkdownContainer"] p.method {font-size: 0.95rem; color: #475569; margin-bottom: 1.4rem;}
 .card, [data-testid="stExpander"] details, [data-testid="stVerticalBlockBorderWrapper"]:has(> div > [data-testid="stVerticalBlock"]) {
     background: #ffffff;}
-[data-testid="stHeader"] {background: #f6f6f3;}
-[data-testid="stSidebar"] {background: #eeede8; border-right: 1px solid #e3e2dd;}
-.card {border: 1px solid #e3e2dd; border-radius: 0.6rem; padding: 1.1rem 1.25rem; min-width: 0;
-    display: flex; flex-direction: column;}
-.card h4 {font-size: 1.05rem; margin: 0 0 0.1rem; padding: 0;}
-.card p, .card li {font-size: 0.92rem; color: #3d3c39; line-height: 1.5;}
+.card {border: 1px solid #e2e8f0; border-radius: 0.7rem; padding: 1.1rem 1.25rem; min-width: 0;
+    display: flex; flex-direction: column; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);}
+.card h4 {font-family: MONO; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
+    color: #64748b; margin: 0 0 0.15rem; padding: 0;}
+.card p, .card li {font-size: 0.92rem; color: #334155; line-height: 1.5;}
 .card ul {margin: 0.3rem 0 0; padding-left: 1.1rem;}
 .card li {margin: 0.25rem 0;}
 .card img {width: 100%; display: block; margin-top: 0.4rem;}
-.card .sub {font-size: 0.85rem; color: #6b6a66; margin: 0 0 0.7rem;}
+.card .sub {font-size: 0.85rem; color: #64748b; margin: 0 0 0.7rem;}
 .card .note {margin: 0.6rem 0 0;}
-.grid {display: grid; grid-template-columns: 1fr 1.35fr; gap: 1rem; margin-bottom: 1rem;}
+.grid {display: grid; grid-template-columns: 1.1fr 1.3fr; gap: 1rem; margin-bottom: 1rem;}
 .pair {display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1.5rem;}
 @media (max-width: 820px) {.grid, .pair {grid-template-columns: 1fr;}}
 .card ul.rules {list-style: none; padding: 0; margin: 0;}
-.rules li {display: grid; grid-template-columns: 4.6rem 1fr; gap: 0.7rem; align-items: baseline; margin: 0;
-    padding: 0.32rem 0; border-top: 1px solid #ecebe7; color: #0b0b0b;}
+.rules li {display: grid; grid-template-columns: 4.8rem 1fr; gap: 0.7rem; align-items: baseline; margin: 0;
+    padding: 0.32rem 0; border-top: 1px solid #f1f5f9; color: #0f172a; font-weight: 500;}
 .rules li:first-child {border-top: none;}
-.rules small {display: block; color: #6b6a66; font-size: 0.8rem; line-height: 1.35;}
-.tag {font-size: 0.75rem; text-align: center; border-radius: 0.3rem; padding: 0.08rem 0.3rem; white-space: nowrap;}
-.tag.held {background: #e5eefa; color: #1d5fae;}
-.tag.mixed {background: #efeee9; color: #52514e;}
-.tag.failed {border: 1px solid #dddcd6; color: #6b6a66;}
-.statement {display: flex; gap: 1.1rem; align-items: center; border-left: 3px solid #2a78d6;
-    padding: 0.2rem 0 0.2rem 1rem; margin-top: auto; font-size: 0.95rem; line-height: 1.45; color: #0b0b0b;}
-.number {font-family: Georgia, serif; font-size: 2.4rem; font-weight: 500; line-height: 1; color: #0b0b0b;}
+.rules small {display: block; font-weight: 400; color: #64748b; font-size: 0.78rem; line-height: 1.4;}
+.tag {font-family: MONO; font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
+    text-align: center; border-radius: 0.3rem; padding: 0.12rem 0.3rem; white-space: nowrap;}
+.tag.held {background: #dcfce7; color: #15803d;}
+.tag.mixed {background: #fef3c7; color: #b45309;}
+.tag.failed {background: #f1f5f9; color: #64748b;}
+.statement {display: flex; gap: 1.1rem; align-items: center; background: #f5f8ff; border: 1px solid #dbe5ff;
+    border-radius: 0.5rem; padding: 0.7rem 1rem; margin-top: auto; font-size: 0.92rem; line-height: 1.45; color: #0f172a;}
+.number {font-family: MONO; font-size: 2.3rem; font-weight: 700; letter-spacing: -0.04em; line-height: 1; color: #1d4ed8;}
 [data-testid="stMetricValue"] > div {overflow: visible; text-overflow: clip; white-space: nowrap;}
 .katex-display {overflow-x: auto; overflow-y: hidden; padding: 0.25rem 0;}
 </style>
-"""
+""".replace("MONO", MONO)
 
 GUIDE = """
 A rule is a keyword, `IF`, then one or more comparisons.
@@ -195,7 +199,7 @@ def lower_cards(h):
 
 
 def top_of_page():
-    st.markdown('<p class="lead">Backtester</p>'
+    st.markdown('<p class="lead">Backtester<span class="pill">EUR/USD · daily · 2005-2026</span></p>'
                 '<p class="conclusion">8 trading rules for EUR/USD, designed on 2005-2015 and tested on 2016-2026: '
                 '2 held up, 1 was mixed, 5 failed.</p>'
                 '<p class="method">Each rule is tested on years it was not designed on, against random strategies '
