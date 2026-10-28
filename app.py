@@ -2,6 +2,8 @@
 
 import base64
 import io
+import json
+from contextlib import contextmanager
 from datetime import date
 
 import matplotlib.pyplot as plt
@@ -65,8 +67,86 @@ h1, h2, h3, h4, h5 {letter-spacing: -0.015em;}
 .number {font-family: MONO; font-size: 2.3rem; font-weight: 700; letter-spacing: -0.04em; line-height: 1; color: #1d4ed8;}
 [data-testid="stMetricValue"] > div {overflow: visible; text-overflow: clip; white-space: nowrap;}
 .katex-display {overflow-x: auto; overflow-y: hidden; padding: 0.25rem 0;}
+#results {scroll-margin-top: 4.5rem;}
+button.bt-loading {pointer-events: none; position: relative; opacity: 0.9;}
+button.bt-loading p {visibility: hidden;}
+button.bt-loading::after {content: "Running…"; position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; padding-left: 1.4rem; font-weight: 600;}
+button.bt-loading::before {content: ""; position: absolute; top: 50%; left: calc(50% - 3.4rem); width: 0.85rem;
+    height: 0.85rem; margin-top: -0.43rem; border: 2px solid currentColor; border-right-color: transparent;
+    border-radius: 50%; animation: bt-spin 0.7s linear infinite;}
+@keyframes bt-spin {to {transform: rotate(360deg);}}
+.skeleton {display: flex; flex-direction: column; gap: 0.9rem; padding: 0.5rem 0 1rem;}
+.skeleton .row {display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.9rem;}
+.skeleton .bar {height: 5.6rem; border-radius: 0.6rem; background: #e2e8f0; animation: bt-pulse 1.2s ease-in-out infinite;}
+.skeleton .bar.title {height: 1.9rem; width: 40%;}
+.skeleton .bar.tabs {height: 2.2rem; width: 60%;}
+.skeleton .bar.chart {height: 20rem;}
+@keyframes bt-pulse {50% {opacity: 0.45;}}
+@media (prefers-reduced-motion: reduce) {.skeleton .bar, button.bt-loading::before {animation: none;}}
 </style>
 """.replace("MONO", MONO)
+
+# grey placeholder in the shape of the results: title, three metric cards, verdict, tabs, chart
+SKELETON = """
+<div class="skeleton {kind}">
+  <div class="bar title"></div>
+  <div class="row"><div class="bar"></div><div class="bar"></div><div class="bar"></div></div>
+  <div class="bar"></div>
+  <div class="bar tabs"></div>
+  <div class="bar chart"></div>
+</div>
+"""
+
+# Instant feedback in the browser, before Streamlit has started its rerun: pressing a run button (or Enter
+# in a sidebar field) puts the button in a loading state, scrolls to where the results will appear and
+# shows a skeleton there. The server's own spinner and skeleton take over a moment later; once the run is
+# over (Streamlit's "running" indicator is gone) the button goes back to normal.
+LOADING_JS = """
+<script>
+(() => {
+  if (window.btLoading) return;
+  window.btLoading = true;
+  const RUN = ["Run backtest", "Run the pendulum study with all checks"];
+  const SKELETON = %s;
+  const label = (b) => (b.innerText || "").trim();
+
+  function start(button) {
+    button.classList.add("bt-loading");
+    // on a phone the sidebar covers the page, so close it to show where the results will appear
+    if (window.innerWidth < 768) document.querySelector('[data-testid="stSidebarCollapseButton"] button')?.click();
+    const anchor = document.getElementById("results");
+    if (anchor) {
+      anchor.innerHTML = SKELETON;
+      anchor.scrollIntoView({behavior: "smooth", block: "start"});
+    }
+    const began = Date.now();
+    let seenRunning = false, idle = 0;
+    const timer = setInterval(() => {
+      const running = !!document.querySelector('[data-testid="stStatusWidget"]');
+      if (document.querySelector(".skeleton.server")) anchor?.querySelector(".skeleton.client")?.remove();
+      if (running) { seenRunning = true; idle = 0; }
+      else if (seenRunning || Date.now() - began > 4000) idle += 1;
+      if (idle >= 5) {
+        clearInterval(timer);
+        document.querySelectorAll(".bt-loading").forEach((b) => b.classList.remove("bt-loading"));
+        anchor?.querySelector(".skeleton.client")?.remove();
+      }
+    }, 100);
+  }
+
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (button && RUN.includes(label(button))) start(button);
+  }, true);
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || !event.target.closest('[data-testid="stForm"] input')) return;
+    const button = [...document.querySelectorAll('[data-testid="stForm"] button')].find((b) => label(b) === RUN[0]);
+    if (button) start(button);
+  }, true);
+})();
+</script>
+"""
 
 GUIDE = """
 A rule is a keyword, `IF`, then one or more comparisons.
@@ -563,6 +643,18 @@ def pendulum_section():
         return st.button("Run the pendulum study with all checks")
 
 
+@contextmanager
+def running(message):
+    """A spinner with the results' skeleton under it, in the spot the browser has scrolled to."""
+    with st.spinner(message, show_time=True):
+        skeleton = st.empty()
+        skeleton.html(SKELETON.format(kind="server"))
+        try:
+            yield
+        finally:
+            skeleton.empty()
+
+
 def main():
     st.markdown(STYLE, unsafe_allow_html=True)
     top_of_page()
@@ -576,9 +668,11 @@ def main():
     with st.expander("Rule syntax"):
         st.markdown(GUIDE)
 
+    # where the results appear; the browser scrolls here as soon as a run button is pressed
+    st.html('<div id="results"></div>')
     if run_default:
         st.session_state["problems"] = []
-        with st.spinner("Running the pendulum study with all checks. This takes about a minute.", show_time=True):
+        with running("Running the pendulum study with all checks. This takes about a minute."):
             store = pendulum_study(date.today().isoformat())
         if not store["results"]:
             pendulum_study.clear()  # e.g. Yahoo was unreachable: try again next time
@@ -590,7 +684,7 @@ def main():
         if not problems:
             message = ("Running the backtest and the robustness checks. This takes about a minute."
                        if advanced else "Running the backtest...")
-            with st.spinner(message, show_time=True):
+            with running(message):
                 st.session_state["study"] = {**analyse(*inputs, advanced), "title": "Your backtest"}
 
     for problem in st.session_state.get("problems", []):
@@ -599,6 +693,9 @@ def main():
         st.divider()
         show_study(st.session_state["study"])
     st.caption("Daily data from Yahoo Finance. Not financial advice.")
+    # Streamlit's HTML sanitiser drops a script whose text looks like it contains tags, so "<" is escaped
+    skeleton = json.dumps(SKELETON.format(kind="client")).replace("<", r"\u003c")
+    st.html(LOADING_JS.replace("%s", skeleton), unsafe_allow_javascript=True)
 
 
 main()
