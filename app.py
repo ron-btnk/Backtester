@@ -1,5 +1,6 @@
 """Streamlit front end for the backtester. Run with: streamlit run app.py"""
 
+import base64
 import io
 from datetime import date
 
@@ -29,11 +30,34 @@ h2, h3, h4, h5 {font-weight: 500 !important;}
     margin: 0 0 0.5rem;}
 [data-testid="stMarkdownContainer"] p.conclusion {font-size: 1.1rem; color: #0b0b0b; margin-bottom: 0.2rem;}
 [data-testid="stMarkdownContainer"] p.method {font-size: 0.95rem; color: #52514e; margin-bottom: 1.4rem;}
-.ideas {font-size: 0.95rem; line-height: 1.9;}
-.ideas div {display: flex; justify-content: space-between; border-bottom: 1px solid #ecebe7;}
-.ideas .held {color: #0b0b0b;}
-.ideas .other {color: #6b6a66;}
-.ideas .note {border: none; font-size: 0.8rem; color: #6b6a66; line-height: 1.4; padding-top: 0.4rem;}
+.stApp {background: #f6f6f3;}
+.card, [data-testid="stExpander"] details, [data-testid="stVerticalBlockBorderWrapper"]:has(> div > [data-testid="stVerticalBlock"]) {
+    background: #ffffff;}
+[data-testid="stHeader"] {background: #f6f6f3;}
+[data-testid="stSidebar"] {background: #eeede8; border-right: 1px solid #e3e2dd;}
+.card {border: 1px solid #e3e2dd; border-radius: 0.6rem; padding: 1.1rem 1.25rem; min-width: 0;
+    display: flex; flex-direction: column;}
+.card h4 {font-size: 1.05rem; margin: 0 0 0.1rem; padding: 0;}
+.card p, .card li {font-size: 0.92rem; color: #3d3c39; line-height: 1.5;}
+.card ul {margin: 0.3rem 0 0; padding-left: 1.1rem;}
+.card li {margin: 0.25rem 0;}
+.card img {width: 100%; display: block; margin-top: 0.4rem;}
+.card .sub {font-size: 0.85rem; color: #6b6a66; margin: 0 0 0.7rem;}
+.card .note {margin: 0.6rem 0 0;}
+.grid {display: grid; grid-template-columns: 1fr 1.35fr; gap: 1rem; margin-bottom: 1rem;}
+.pair {display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1.5rem;}
+@media (max-width: 820px) {.grid, .pair {grid-template-columns: 1fr;}}
+.card ul.rules {list-style: none; padding: 0; margin: 0;}
+.rules li {display: grid; grid-template-columns: 4.6rem 1fr; gap: 0.7rem; align-items: baseline; margin: 0;
+    padding: 0.32rem 0; border-top: 1px solid #ecebe7; color: #0b0b0b;}
+.rules li:first-child {border-top: none;}
+.rules small {display: block; color: #6b6a66; font-size: 0.8rem; line-height: 1.35;}
+.tag {font-size: 0.75rem; text-align: center; border-radius: 0.3rem; padding: 0.08rem 0.3rem; white-space: nowrap;}
+.tag.held {background: #e5eefa; color: #1d5fae;}
+.tag.mixed {background: #efeee9; color: #52514e;}
+.tag.failed {border: 1px solid #dddcd6; color: #6b6a66;}
+.statement {display: flex; gap: 1.1rem; align-items: center; border-left: 3px solid #2a78d6;
+    padding: 0.2rem 0 0.2rem 1rem; margin-top: auto; font-size: 0.95rem; line-height: 1.45; color: #0b0b0b;}
 .number {font-family: Georgia, serif; font-size: 2.4rem; font-weight: 500; line-height: 1; color: #0b0b0b;}
 [data-testid="stMetricValue"] > div {overflow: visible; text-overflow: clip; white-space: nowrap;}
 .katex-display {overflow-x: auto; overflow-y: hidden; padding: 0.25rem 0;}
@@ -109,19 +133,65 @@ def show_image(png, caption):
 
 @st.cache_data(show_spinner=False)
 def headline():
-    """The 200-day rule on the fixed study period, with its random benchmark and its chart."""
+    """The 200-day rule on the fixed study period: random benchmark, chart and the facts for the limits card."""
     result = study.run(load_prices(study.TICKER, study.START, study.END))
-    return {"random": result["random"], "full_return": result["full"]["metrics"]["total_return"],
-            "bh_return": result["full"]["bh_metrics"]["total_return"],
-            "chart": to_png(study.plot_equity(result))}
+    full = result["full"]
+    strategy = full["strategy"]
+    days = len(strategy) - 1
+    return {"random": result["random"], "full_return": full["metrics"]["total_return"],
+            "bh_return": full["bh_metrics"]["total_return"], "sharpe": full["metrics"]["sharpe"],
+            # standard error of an annualised Sharpe ratio, roughly sqrt(252 / trading days)
+            "sharpe_se": (252 / days) ** 0.5, "years": days / 252,
+            "top_trade_share": full["stats"]["top_trade_share"],
+            "peak": strategy.idxmax(), "below_peak": (1 - strategy.iloc[-1] / strategy.max()) * 100,
+            "end": strategy.index[-1], "chart": to_png(study.plot_equity(result))}
 
 
-def ideas_html():
-    rows = "".join(
-        f'<div class="{"held" if outcome == "held up" else "other"}"><span>{name}</span><span>{outcome}</span></div>'
-        for name, outcome in study.IDEAS)
-    note = f'<div class="note">{study.NOT_RERUN} Result from an earlier run. The rules were not kept.</div>'
-    return f'<div class="ideas"><strong>Rules, designed on 2005-2015</strong>{rows}{note}</div>'
+TAGS = {"held up": "held", "mixed": "mixed", "failed": "failed"}
+
+
+def rules_card():
+    rows = "".join(f'<li><span class="tag {TAGS[outcome]}">{outcome}</span><span>{name}<small>{detail}</small></span></li>'
+                   for name, outcome, detail in study.IDEAS)
+    return ('<div class="card"><h4>Rules</h4><p class="sub">Set on 2005-2015, tested on 2016-2026</p>'
+            f'<ul class="rules">{rows}</ul>'
+            f'<p class="sub note">{study.NOT_RERUN} Result from an earlier run. The rules were not kept.</p></div>')
+
+
+def chart_card(h):
+    image = base64.b64encode(h["chart"]).decode()
+    return ('<div class="card"><h4>200-day trend rule and buy and hold</h4>'
+            f'<p class="sub">EUR/USD, value of 10,000 after 0.02% costs. Return {h["full_return"]:+.1f}%, '
+            f'buy and hold {h["bh_return"]:+.1f}%.</p>'
+            f'<img src="data:image/png;base64,{image}" alt="Portfolio value of the 200-day trend rule against buy '
+            'and hold on EUR/USD from 2005 to 2026, with the train and test split at 2016">'
+            f'{statement(h)}</div>')
+
+
+def statement(h):
+    rnd = h["random"]
+    return (f'<div class="statement"><span class="number">{rnd["sharpe_beaten_pct"]:.0f}%</span>'
+            f'<span>of {rnd["runs"]} random strategies with the same time in the market had a lower Sharpe ratio '
+            'than the 200-day trend rule. Rally then dip has no benchmark because its rules were not kept.'
+            '</span></div>')
+
+
+def lower_cards(h):
+    pendulum = ('<div class="card"><h4>Pendulum model</h4>'
+                '<p>The method was first checked on simulated prices. On prices that swing like a pendulum the '
+                'rules beat all 300 random strategies; on random prices they found nothing.</p>'
+                '<p>On EUR/USD the model returned -16.0% against -17.6% for buy and hold and beat 52% of random '
+                'strategies. An earlier version was replaced because its physics was incorrect, not because of '
+                'its result.</p></div>')
+    limits = ('<div class="card"><h4>Limits</h4><ul>'
+              f'<li>One currency pair, {h["years"]:.0f} years of daily data.</li>'
+              f'<li>Sharpe ratio {h["sharpe"]:.2f}, with a standard error of about {h["sharpe_se"]:.2f}: not '
+              'statistically different from zero.</li>'
+              f'<li>The largest trade made {h["top_trade_share"]:.0f}% of the net profit. The highest value was '
+              f'in {h["peak"]:%B %Y}; on {h["end"]:%Y-%m-%d} the rule was {h["below_peak"]:.1f}% below it.</li>'
+              '<li>With 8 rules tested, about 2 would pass both periods by chance.</li>'
+              '<li>Interest rate differences between the two currencies are ignored.</li></ul></div>')
+    return f'<div class="pair">{pendulum}{limits}</div>'
 
 
 def top_of_page():
@@ -136,17 +206,8 @@ def top_of_page():
     except Exception as e:
         st.caption(f"The study chart could not load ({e}). Yahoo Finance may be unreachable.")
         return
-    left, right = st.columns([1, 2], gap="large")
-    left.markdown(ideas_html(), unsafe_allow_html=True)
-    with right:
-        st.image(h["chart"], width="stretch")
-    rnd = h["random"]
-    with st.container(border=True):
-        number, text = st.columns([1, 6], vertical_alignment="center")
-        number.markdown(f'<div class="number">{rnd["sharpe_beaten_pct"]:.0f}%</div>', unsafe_allow_html=True)
-        text.markdown(f"of {rnd['runs']} random strategies with the same time in the market had a lower Sharpe "
-                      f"ratio than the 200-day trend rule. Return {h['full_return']:+.1f}%, buy and hold "
-                      f"{h['bh_return']:+.1f}%. Rally then dip has no benchmark because its rules were not kept.")
+    st.markdown(f'<div class="grid">{rules_card()}{chart_card(h)}</div>{lower_cards(h)}',
+                unsafe_allow_html=True)
 
 
 # ---- Your own backtest ----
@@ -478,7 +539,7 @@ def pendulum_study(end):
 
 def pendulum_section():
     d = bt.DEFAULT_STUDY
-    with st.expander("Pendulum model (failed)"):
+    with st.expander("Pendulum model: equations and rules"):
         st.write("The model treats the 60-day average as the bottom of a pendulum's swing and the price as the "
                  "pendulum. Rules were set on 2005-2015 and tested from 2016 on.")
         st.caption("Equation of motion for small swings")

@@ -50,7 +50,7 @@ Every rule was designed on 2005-2015 and tested once on 2016-2026. Costs were 0.
 
 \* Result from an earlier run. The rules were not kept, so they cannot be rerun or benchmarked.
 
-The 200-day rule is a standard trend rule; published studies found trend rules profitable on currencies in the 1980s and 1990s. It was fixed before any data was examined. One trade made 82% of its profit, so the result depends on a few long trends. Rally then dip was designed for this study; every nearby setting in its sensitivity check beat buy and hold. The next step is to run both rules, unchanged, on other currency pairs.
+The 200-day rule is a standard trend rule; published studies found trend rules profitable on currencies in the 1980s and 1990s. It was fixed before any data was examined. One trade made 82% of its profit, so the result depends on a few long trends. Its Sharpe ratio of 0.15 has a standard error of about 0.21 over 22 years, so it is not statistically different from zero. Its highest value was in September 2022; on 2026-10-15 it was 13.5% below it. Rally then dip was designed for this study; every nearby setting in its sensitivity check beat buy and hold. The next step is to run both rules, unchanged, on other currency pairs.
 
 EUR/USD was chosen because it is the most traded currency pair, costs are low, and its price is not affected by earnings, dividends or stock splits. Many participants, such as central banks and companies hedging payments, trade for reasons other than profit.
 
