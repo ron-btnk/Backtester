@@ -380,9 +380,15 @@ def robustness_tab(ticker, r, store):
     else:
         st.write(f"**{sens['stable_pct']:.0f}%** of {sens['tested']} nearby settings beat buy & hold "
                  f"(Sharpe {sens['bh_sharpe']:.2f}). A real edge shouldn't depend on one exact number.")
-    show_image(figure(store, ("checks", ticker), lambda: bt.plot_checks(ticker, r)),
-               "Left: total return of each random strategy, with your rule as the blue line. Right: Sharpe "
-               "when two numbers in the rules are moved; green beats buy & hold, the box is your setting.")
+    # the heatmap needs two numbers in the rules, so a rule like PRICE > MA200 only gets the histogram
+    notes = []
+    if rnd is not None:
+        notes.append("Grey bars: the total return of each random strategy. Blue line: your rule.")
+    if sens is not None and sens["grid"] is not None:
+        notes.append("Heatmap: Sharpe when two numbers in the rules are moved. Blue beats buy & hold, orange "
+                     "does worse, the box is your setting.")
+    caption = " ".join(notes)
+    show_image(figure(store, ("checks", ticker), lambda: bt.plot_checks(ticker, r)), caption)
     if sens is not None:
         rows = {}
         for row in sens["rows"]:
@@ -447,9 +453,9 @@ def show_study(store):
     charts, trades, train_test, robustness = st.tabs(["Charts", "Trades", "Train vs test", "Robustness checks"])
     with charts:
         split = store["split_date"]
-        caption = ("Top: price, shaded while the rules held a position. Below: portfolio value against buy & hold"
-                   + ("" if not r["advanced"] else ", the share of money invested, and the drawdown")
-                   + (f". Dotted line: train/test split at {split}." if split else "."))
+        caption = ("Top: price, shaded blue while long and orange while short. Below: portfolio value against "
+                   "buy & hold" + ("" if not r["advanced"] else ", the share of money invested, and the drawdown")
+                   + (f". Vertical line: train/test split at {split}." if split else "."))
         show_image(figure(store, ("results", ticker),
                           lambda: bt.plot_results(ticker, r, split, compact=not r["advanced"])), caption)
     with trades:
