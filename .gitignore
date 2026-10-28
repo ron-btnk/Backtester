@@ -1,6 +1,19 @@
-.ipynb_checkpoints/
+# Python
 __pycache__/
 *.pyc
-.DS_Store
-.env
+.venv/
+venv/
 .pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Streamlit (config.toml is shared, secrets are not)
+.streamlit/secrets.toml
+
+# editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.env

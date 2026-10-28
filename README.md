@@ -1,30 +1,83 @@
 # Backtester
 
-A backtester for trading rules written as plain text, including full formulas. Every backtest runs with trading costs, an out-of-sample test period, a comparison against 300 random strategies and a parameter sensitivity check, so a result that only worked by luck is easy to spot.
+[![tests](https://github.com/ron-btnk/Backtester/actions/workflows/tests.yml/badge.svg)](https://github.com/ron-btnk/Backtester/actions/workflows/tests.yml)
 
-[Open the web app](https://backtester-rbtnk.streamlit.app/) to try it without installing anything.
+## A backtester built to catch me fooling myself.
 
-The repository includes a study of 8 strategies on EUR/USD from 2005 to 2026, one of which models the exchange rate as a damped pendulum. Two strategies held up on the out-of-sample period. The pendulum did not. [See the study](#study-eurusd-2005-2026).
+I tested 8 trading ideas on EUR/USD, designed on 2005-2015 and judged on 2016-2026. Five failed, one was mixed, two held up.
 
-## Quick start
+![8 ideas marked held up, mixed or failed, next to the 200-day trend rule's portfolio value against buy and hold on EUR/USD, with the train | test split at 2016](docs/headline.png)
 
-Online: https://backtester-rbtnk.streamlit.app/
+**88%.** The 200-day trend rule beat 263 of 300 random strategies that spent the same time in the market, ranked by Sharpe. Rally then dip can't be benchmarked, because its rules were not kept.
+
+[Open the web app](https://backtester-rbtnk.streamlit.app/) to try your own rules, or run it locally (below).
+
+<details>
+<summary><b>Run it</b></summary>
+
+Online: https://backtester-rbtnk.streamlit.app/. It runs on a small free server that sleeps after 12 hours without visitors, so the first load can take a minute.
 
 Locally, as a web app:
 
 ```
-cd ~\Desktop
 git clone https://github.com/ron-btnk/Backtester
 cd Backtester
 python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-Locally, as a notebook: run the first four lines above, then `python -m notebook Backtester.ipynb`. Run all cells, press Enter for the pendulum study or type C to enter your own rules.
+As a notebook: `python -m pip install notebook`, then `python -m notebook Backtester.ipynb`. Run all cells and press Enter for the pendulum study, or type C to enter your own rules.
 
-The hosted app runs on a small free server. It is slower on the heavy checks and sleeps after 12 hours without visitors, so the first load can take a minute. For many backtests, run it locally.
+Tests: `python -m pip install pytest`, then `python -m pytest`. They use made-up prices and need no internet.
 
-## Writing rules
+To reproduce the numbers and the picture above: `python study.py`.
+
+</details>
+
+<details>
+<summary><b>The study: 8 ideas on EUR/USD</b></summary>
+
+Every rule was designed on 2005-2015 and tested once on 2016-2026. Costs were 0.02% per trade. Buy and hold lost 17.6% from 2005-01-03 to 2026-10-15.
+
+| Idea | What it bets on | Result |
+|---|---|---|
+| 200-day trend | Long above the 200-day average, short below | Held up. +27.4%, positive in both periods (+14.0% train, +10.8% test) |
+| Rally then dip* | Profit-takers cause a dip, latecomers buy it | Held up. About +31%, positive in both periods |
+| Break-even vs momentum* | Size of the drop decides who wins at the old high | Mixed. Roughly flat, lost in training, gained in the test |
+| Pendulum | Price swings around its average like a pendulum | Failed. [Details](#the-pendulum-model) |
+| Short-term reversal* | Buy after a down day, sell after an up day | Failed. About -48%, trades almost daily so costs dominate |
+| Failed breakouts* | Bet against breakouts that reverse within days | Failed. About -42%, every nearby setting lost too |
+| Equilibrium mean reversion* | Bet on a return to the average | Failed on 2005-2015, not tested further |
+| Break-even sellers* | Old highs act as resistance, old lows as support | Failed on 2005-2015, not tested further |
+
+\* Result from an earlier run. These rules were not kept, so they can't be rerun or benchmarked.
+
+The 200-day rule is a classic trend rule, and research found trend rules profitable on currencies in the 1980s and 90s. It was fixed before looking at any data. Its weak spot: one trade made 82% of its profit, so the result rests on a few long trends. Rally then dip was designed for this study, and its sensitivity heatmap was green for every nearby setting. The next test is running both, unchanged, on other currency pairs.
+
+EUR/USD was chosen because it is the most traded currency pair, costs are low, and its price is not affected by earnings, dividends or stock splits. Many large traders in currencies, such as central banks and companies hedging payments, trade for reasons other than profit, which is where an edge would have to come from.
+
+</details>
+
+<details>
+<summary><b>The checks every backtest goes through</b></summary>
+
+Prices are daily Open, High, Low and Close from Yahoo Finance, with 500 extra days loaded before the start date so long averages are ready on day one.
+
+| Check | What it does |
+|---|---|
+| Next-day fills | Signals use each day's close and orders fill at the next day's open, so a rule never trades on a price it could not have known |
+| Train/test split | Rules are chosen on one period and judged on a later one they never saw |
+| Random benchmark | 300 strategies with the same holding periods, placed at random times. A real edge should beat most of them |
+| Sensitivity | Every number in the rules is moved to 0.5x, 0.75x, 1.25x and 1.5x. A lucky rule shows up as a single good cell in a heatmap |
+| Number search | Looks for better numbers on the training period only, then reports how they do on the test period |
+| Cost check | Reruns without costs to show how much of the return costs took |
+
+Every trade pays a cost as a percentage of the traded value, and short positions pay a daily borrow fee. If a short signal arrives while the strategy is long, the position flips directly. Stops and take profits are checked on the close and filled at the next open. Each backtest ends with a verdict that lists what passed and what failed.
+
+</details>
+
+<details>
+<summary><b>Writing rules</b></summary>
 
 A strategy is up to four rules: when to buy, sell, short and cover. Each rule compares two formulas.
 
@@ -53,50 +106,16 @@ BUY IF PRICE < PRICE[1]
 
 Optional settings: position sizing by an indicator, volatility targeting, a rebalance band, stop loss, take profit and a borrow fee for shorts.
 
-## How a backtest runs
+</details>
 
-Prices are daily Open, High, Low and Close from Yahoo Finance, with 500 extra days loaded before the start date so long averages are ready on day one.
+<details>
+<summary><b>The pendulum model</b></summary>
 
-Signals are calculated on each day's close and orders fill at the next day's open, so a rule never uses a price it could not have known. Every trade pays a cost as a percentage of the traded value, and short positions pay a daily borrow fee. If a short signal arrives while the strategy is long, the position flips directly. Stops and take profits are checked on the close and filled at the next open.
-
-## Checks
-
-| Check | What it does |
-|---|---|
-| Train/test split | Rules are chosen on one period and judged on a later one the rules never saw |
-| Random benchmark | 300 strategies with the same holding periods, placed at random times. A real edge should beat most of them |
-| Sensitivity | Every number in the rules is moved to 0.5x, 0.75x, 1.25x and 1.5x. A real edge survives small changes, a lucky one shows up as a single good cell in a heatmap |
-| Number search | Looks for better numbers on the training period only, then reports how they do on the test period |
-| Cost check | Reruns without costs to show how much of the return costs took |
-
-Each backtest ends with a verdict that lists what passed and what failed.
-
-## Study: EUR/USD 2005-2026
-
-Every rule was designed on 2005-2015 and tested once on 2016-2026. Costs were 0.02% per trade. Buy and hold lost about 17% over the full period.
-
-| Strategy | Idea | Result |
-|---|---|---|
-| 200-day trend | Long above the 200-day average, short below | Held up. About +27%, positive in both periods |
-| Rally then dip | Profit-takers cause a dip, latecomers buy it | Held up. About +31%, positive in both periods |
-| Break-even vs momentum | Size of the drop decides who wins at the old high | Mixed. Roughly flat, lost in training, gained in the test |
-| Pendulum | Price swings around its average like a pendulum | Failed. [Details](#the-pendulum-model) |
-| Short-term reversal | Buy after a down day, sell after an up day | Failed. About -48%, trades almost daily so costs dominate |
-| Failed breakouts | Bet against breakouts that reverse within days | Failed. About -42%, every nearby setting lost too |
-| Equilibrium mean reversion | Bet on a return to the average | Failed on 2005-2015, not tested further |
-| Break-even sellers | Old highs act as resistance, old lows as support | Failed on 2005-2015, not tested further |
-
-The 200-day rule is a classic trend rule, and research found trend rules profitable on currencies in the 1980s and 90s. It was fixed before looking at any data. Rally then dip was designed for this study, and its sensitivity heatmap is green for every nearby setting. The next test is running both, unchanged, on other currency pairs.
-
-EUR/USD was chosen because it is the most traded currency pair, costs are low, and its price is not affected by earnings, dividends or stock splits. Many large traders in currencies, such as central banks and companies hedging payments, trade for reasons other than profit, which is where an edge would have to come from.
-
-### The pendulum model
-
-The pendulum model failed. On EUR/USD it did about as well as buy and hold and no better than random timing.
+The pendulum model failed. On EUR/USD it did about as well as buy and hold and no better than random timing. Numbers are for 2005-01-03 to 2026-10-15.
 
 | | Pendulum | Buy and hold |
 |---|---|---|
-| Total return | -15.8% | -17.1% |
+| Total return | -16.0% | -17.6% |
 | Sharpe | -0.03 | -0.02 |
 | Max drawdown | -41.8% | -40.0% |
 | Trades | 96 | - |
@@ -130,19 +149,22 @@ On EUR/USD the verdict was:
 
 ```
 Verdict: doesn't hold up
-  Beat buy & hold (-15.8% vs -17.1%)
+  Beat buy & hold (-16.0% vs -17.6%)
   Worse Sharpe (-0.03 vs -0.02)
   Costs took 3.3 points of return
   Failed in the train period, worked in the test period
-  Beat 44% of 300 random strategies
+  Beat 52% of 300 random strategies
   29% of 28 nearby settings beat buy & hold
 ```
 
-It lost to buy and hold in 2005-2015 (Sharpe -0.13 against -0.07) and beat it in 2016-2026 (0.16 against 0.08), which is what noise looks like. The worst trades were longs held for 4 to 8 months through long declines. In a slow decline the average falls with the price, so the price probably never looks far enough from equilibrium to trigger an exit. The number search found a 48-day window that made +17.9% over the full period but did worse than the original on 2016-2026 alone (Sharpe -0.03 against 0.16), so it was fitting the past.
+It lost to buy and hold in 2005-2015 (Sharpe -0.13 against -0.07) and beat it in 2016-2026 (0.16 against 0.07), which is what noise looks like. The worst trades were longs held for 4 to 8 months through long declines. In a slow decline the average falls with the price, so the price probably never looks far enough from equilibrium to trigger an exit. The number search found a 48-day window that made +17.7% over the full period but did worse than the original on 2016-2026 alone (Sharpe -0.03 against 0.16), so it was fitting the past.
 
-This is the second version of the model. The first used the full equation with sin and arccos, which treats θ as a real angle even though it is measured in standard deviations, and it assumed the market conserves energy. It lost 23.1% against 16.6% for buy and hold and beat 25% of random strategies. The model was rewritten because the physics was wrong, not to improve the result, so the second version also had a single test.
+This is the second version of the model. The first used the full equation with sin and arccos, which treats θ as a real angle even though it is measured in standard deviations, and it assumed the market conserves energy. In an earlier run it lost 23.1% against 16.6% for buy and hold and beat 25% of random strategies. The model was rewritten because the physics was wrong, not to improve the result, so the second version also had a single test.
 
-### Multiple testing
+</details>
+
+<details>
+<summary><b>Why two out of eight is not proof</b></summary>
 
 Testing many strategies on the same data produces winners by luck. If a useless rule has a 50% chance of beating buy and hold in a period, and the two periods are independent:
 
@@ -156,18 +178,22 @@ $$P(\text{at least one of } n \text{ wins one period}) = 1 - 0.5^n \qquad P(\tex
 
 Two periods reduce the problem but do not solve it. Eight useless rules would produce two winners in both periods on average, the same number this study found. That is why the random benchmark, the sensitivity check and the fixed 200-day rule matter more than the split itself, and why the next step is testing on currency pairs that were not used to design the rules.
 
-## Project structure
+</details>
+
+<details>
+<summary><b>Project layout and limitations</b></summary>
 
 ```
-backtester.py              engine: indicators, rule parser, backtest loop, checks, charts
 app.py                     Streamlit web app (built with Claude Code)
+backtester.py              engine: indicators, rule parser, backtest loop, checks, charts
+study.py                   reruns the 200-day rule for the numbers and picture at the top
 Backtester.ipynb           notebook version, with the full pendulum study and its output
-tests/test_backtester.py   engine tests on made-up prices, run with python -m pytest
-requirements.txt
+tests/test_backtester.py   engine tests on made-up prices
+docs/headline.png          the picture at the top, written by study.py
 ```
-
-## Limitations
 
 Daily data only. Yahoo's FX open prices are approximate. Interest rate differences between currencies are ignored, which matters most for short positions. Costs are a flat percentage, not real bid/ask spreads. The study covers one currency pair.
+
+</details>
 
 Not financial advice. MIT license.
