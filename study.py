@@ -56,7 +56,7 @@ def run(prices=None):
 
 def plot(result):
     """Ideas marked pass/fail on the left, the 200-day rule's portfolio value on the right."""
-    with plt.rc_context({"font.family": "serif"}):
+    with plt.rc_context({"font.family": "sans-serif"}):
         fig, (list_ax, ax) = plt.subplots(1, 2, figsize=(12, 4.4), gridspec_kw={"width_ratios": [1, 2.1]})
         _draw_ideas(list_ax)
         _draw_equity(ax, result["full"])
@@ -66,7 +66,7 @@ def plot(result):
 
 def plot_equity(result):
     """The equity panel alone, for the app, which gives it a title and lists the rules as text."""
-    with plt.rc_context({"font.family": "serif"}):
+    with plt.rc_context({"font.family": "sans-serif"}):
         fig, ax = plt.subplots(figsize=(8, 4.4))
         _draw_equity(ax, result["full"], title=False)
         fig.tight_layout()
@@ -105,11 +105,11 @@ def _draw_equity(ax, full, title=True):
         ax.set_title(f"EUR/USD {full['start'].year}-{full['end'].year}, value of 10,000 after 0.02% costs",
                      fontsize=11, color=INK, pad=22)
     ax.set_xlim(strategy.index[0], strategy.index[-1])
-    ax.grid(axis="y", color="#e6e5e1", linewidth=0.8)
+    ax.grid(axis="y", color=bt.GRID, linewidth=0.8)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     for side in ("left", "bottom"):
-        ax.spines[side].set_color("#c9c8c3")
+        ax.spines[side].set_color("#cbd5e1")
     ax.tick_params(colors=MUTED, labelsize=9)
 
 
